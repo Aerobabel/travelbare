@@ -6,6 +6,11 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icons/IconNuviaBigger.png",
+    "splash": {
+      "image": "./assets/images/LoadingScreen.png",
+      "resizeMode": "cover",
+      "backgroundColor": "#0E141C"
+    },
     "scheme": "nuviatravel",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,

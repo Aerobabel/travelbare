@@ -1,5 +1,94 @@
-import { Platform, StyleSheet, View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 import MapView, { Marker, Polyline, PROVIDER_DEFAULT, UrlTile } from 'react-native-maps';
+
+const LIGHT_MAP_STYLE = [
+    {
+        "elementType": "geometry",
+        "stylers": [{ "color": "#f5f5f5" }]
+    },
+    {
+        "elementType": "labels.icon",
+        "stylers": [{ "visibility": "off" }]
+    },
+    {
+        "elementType": "labels.text.fill",
+        "stylers": [{ "color": "#616161" }]
+    },
+    {
+        "elementType": "labels.text.stroke",
+        "stylers": [{ "color": "#f5f5f5" }]
+    },
+    {
+        "featureType": "administrative.land_parcel",
+        "elementType": "labels.text.fill",
+        "stylers": [{ "color": "#bdbdbd" }]
+    },
+    {
+        "featureType": "poi",
+        "elementType": "geometry",
+        "stylers": [{ "color": "#eeeeee" }]
+    },
+    {
+        "featureType": "poi",
+        "elementType": "labels.text.fill",
+        "stylers": [{ "color": "#757575" }]
+    },
+    {
+        "featureType": "poi.park",
+        "elementType": "geometry",
+        "stylers": [{ "color": "#e5e5e5" }]
+    },
+    {
+        "featureType": "poi.park",
+        "elementType": "labels.text.fill",
+        "stylers": [{ "color": "#9e9e9e" }]
+    },
+    {
+        "featureType": "road",
+        "elementType": "geometry",
+        "stylers": [{ "color": "#ffffff" }]
+    },
+    {
+        "featureType": "road.arterial",
+        "elementType": "labels.text.fill",
+        "stylers": [{ "color": "#757575" }]
+    },
+    {
+        "featureType": "road.highway",
+        "elementType": "geometry",
+        "stylers": [{ "color": "#dadada" }]
+    },
+    {
+        "featureType": "road.highway",
+        "elementType": "labels.text.fill",
+        "stylers": [{ "color": "#616161" }]
+    },
+    {
+        "featureType": "road.local",
+        "elementType": "labels.text.fill",
+        "stylers": [{ "color": "#9e9e9e" }]
+    },
+    {
+        "featureType": "transit.line",
+        "elementType": "geometry",
+        "stylers": [{ "color": "#e5e5e5" }]
+    },
+    {
+        "featureType": "transit.station",
+        "elementType": "geometry",
+        "stylers": [{ "color": "#eeeeee" }]
+    },
+    {
+        "featureType": "water",
+        "elementType": "geometry",
+        "stylers": [{ "color": "#c9c9c9" }]
+    },
+    {
+        "featureType": "water",
+        "elementType": "labels.text.fill",
+        "stylers": [{ "color": "#9e9e9e" }]
+    }
+];
 
 const DARK_MAP_STYLE = [
     {
@@ -90,7 +179,7 @@ const DARK_MAP_STYLE = [
     }
 ];
 
-const RouteMap = ({ route }) => {
+const RouteMap = ({ route, theme = 'dark' }) => {
     if (!route || !route.start) return null;
 
     // Convert array [lon, lat] to object { latitude, longitude }
@@ -112,11 +201,11 @@ const RouteMap = ({ route }) => {
     const lonDelta = isSinglePoint ? 0.01 : Math.abs(startCoords.longitude - endCoords.longitude) * 1.5;
 
     return (
-        <View style={styles.container}>
+        <View style={[styles.container, { backgroundColor: theme === 'light' ? '#f5f5f5' : '#0E141C' }]}>
             <MapView
                 provider={PROVIDER_DEFAULT}
                 style={styles.map}
-                mapType={Platform.OS === 'android' ? 'none' : 'mutedStandard'}
+                customMapStyle={theme === 'light' ? LIGHT_MAP_STYLE : DARK_MAP_STYLE}
                 initialRegion={{
                     latitude: midLat,
                     longitude: midLon,
@@ -128,32 +217,34 @@ const RouteMap = ({ route }) => {
                 zoomEnabled={true}
                 scrollEnabled={true}
             >
-                {/* CartoDB Dark Matter Tiles */}
-                <UrlTile
-                    urlTemplate="https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png"
-                    maximumZ={19}
-                    flipY={false}
-                    zIndex={-1}
-                />
+                {/* CartoDB Dark Matter Tiles - Only for Dark Mode */}
+                {theme === 'dark' && (
+                    <UrlTile
+                        urlTemplate="https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png"
+                        maximumZ={19}
+                        flipY={false}
+                        zIndex={-1}
+                    />
+                )}
 
                 {!isSinglePoint && endCoords && (
                     <Polyline
                         coordinates={[startCoords, endCoords]}
-                        strokeColor="#3E6FFF"
-                        strokeWidth={2}
+                        strokeColor={theme === 'light' ? "#3E6FFF" : "#3E6FFF"}
+                        strokeWidth={4}
                         lineDashPattern={[1]}
-                        geodesic={true}
+                        geodesic={true} // Simple curved line for now
                         zIndex={10}
                     />
                 )}
 
                 <Marker coordinate={startCoords} anchor={{ x: 0.5, y: 0.5 }}>
-                    <View style={styles.markerDot} />
+                    <View style={[styles.markerDot, { borderColor: theme === 'light' ? '#fff' : '#0E141C' }]} />
                 </Marker>
 
                 {!isSinglePoint && endCoords && (
                     <Marker coordinate={endCoords} anchor={{ x: 0.5, y: 0.5 }}>
-                        <View style={styles.markerDot} />
+                        <View style={[styles.markerDot, { borderColor: theme === 'light' ? '#fff' : '#0E141C' }]} />
                     </Marker>
                 )}
 
@@ -171,17 +262,15 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         borderRadius: 16,
         overflow: 'hidden', // Enforce bounds
-        backgroundColor: '#0E141C', // Ensure container is dark
     },
     map: {
         ...StyleSheet.absoluteFillObject,
     },
     markerDot: {
-        width: 12,
-        height: 12,
-        borderRadius: 6,
+        width: 14,
+        height: 14,
+        borderRadius: 7,
         backgroundColor: '#3E6FFF',
         borderWidth: 2,
-        borderColor: '#0E141C'
     }
 });

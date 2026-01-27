@@ -1,64 +1,141 @@
+import { Ionicons } from '@expo/vector-icons';
 import { useState } from 'react';
 import {
-  Dimensions,
   FlatList,
   Modal,
   StyleSheet,
   Text,
   TouchableOpacity,
-  View,
+  View
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useTheme } from '../context/ThemeContext';
 
 const GuestPicker = ({ onClose, onGuestSelected }) => {
   const insets = useSafeAreaInsets();
-  const [adults, setAdults] = useState(1);
-  const [children, setChildren] = useState(0);
+  const { colors, theme } = useTheme();
+  const [adults, setAdults] = useState(2);
+  const [childrenCount, setChildrenCount] = useState(0);
+  const [childAges, setChildAges] = useState([]);
+
+  // Handle changing number of children
+  const handleChildrenCountChange = (count) => {
+    setChildrenCount(count);
+    // Resize ages array
+    if (count > childAges.length) {
+      // Add more (default age 12 like mockup)
+      const newAges = [...childAges];
+      for (let i = childAges.length; i < count; i++) {
+        newAges.push(12);
+      }
+      setChildAges(newAges);
+    } else {
+      // Trim
+      setChildAges(childAges.slice(0, count));
+    }
+  };
+
+  const handleAgeChange = (index, age) => {
+    const newAges = [...childAges];
+    newAges[index] = age;
+    setChildAges(newAges);
+  };
 
   const handleConfirm = () => {
-    onGuestSelected({ adults, children });
+    onGuestSelected({
+      adults,
+      children: childrenCount,
+      childAges
+    });
     onClose();
   };
 
-  const renderPicker = (title, value, setValue, max) => {
-    const data =
-      title === 'Adults'
-        ? Array.from({ length: max }, (_, i) => i + 1) // [1, 2, ..., max]
-        : Array.from({ length: max }, (_, i) => i); // [0, 1, ..., max-1]
+  const renderNumberPicker = (title, value, onSelect, rangeStart, rangeEnd, keyPrefix) => {
+    const data = Array.from({ length: rangeEnd - rangeStart + 1 }, (_, i) => rangeStart + i);
 
     return (
-      <View style={styles.pickerContainer}>
-        <Text style={styles.label}>{title}</Text>
+      <View style={styles.sectionContainer}>
+        <Text style={[styles.label, { color: colors.textSecondary }]}>{title}</Text>
         <FlatList
           horizontal
           data={data}
-          keyExtractor={(item) => item.toString()}
-          contentContainerStyle={{ gap: 12 }}
+          keyExtractor={(item) => `${keyPrefix}-${item}`}
+          contentContainerStyle={{ gap: 12, paddingRight: 20 }}
           showsHorizontalScrollIndicator={false}
-          renderItem={({ item }) => (
-            <TouchableOpacity
-              style={[styles.option, item === value && styles.selectedOption]}
-              onPress={() => setValue(item)}
-            >
-              <Text style={styles.optionText}>{item}</Text>
-            </TouchableOpacity>
-          )}
+          renderItem={({ item }) => {
+            const isSelected = item === value;
+            return (
+              <TouchableOpacity
+                style={[styles.circleOption, isSelected && styles.selectedCircle]}
+                onPress={() => onSelect(item)}
+              >
+                <Text style={[
+                  styles.optionText,
+                  { color: colors.textTertiary },
+                  isSelected && styles.selectedOptionText
+                ]}>
+                  {item}
+                </Text>
+              </TouchableOpacity>
+            );
+          }}
         />
       </View>
     );
   };
 
   return (
-    <Modal transparent animationType="slide">
-      <View style={styles.backdrop} />
-      <View style={[styles.modal, { paddingBottom: 20 + insets.bottom }]}>
-        <Text style={styles.title}>Who's traveling?</Text>
-        {renderPicker('Adults', adults, setAdults, 6)}
-        {renderPicker('Children', children, setChildren, 5)}
+    <Modal visible animationType="slide" presentationStyle="overFullScreen">
+      <View style={[styles.container, { paddingTop: insets.top, paddingBottom: insets.bottom, backgroundColor: colors.background }]}>
 
-        <TouchableOpacity style={styles.button} onPress={handleConfirm}>
-          <Text style={styles.buttonText}>Confirm</Text>
-        </TouchableOpacity>
+        {/* Header */}
+        <View style={styles.header}>
+          <TouchableOpacity
+            style={[styles.closeBtn, { backgroundColor: theme === 'dark' ? '#161B23' : '#F3F4F6', borderColor: colors.pillBorder }]}
+            onPress={onClose}
+          >
+            <Ionicons name="close" size={24} color={colors.textSecondary} />
+          </TouchableOpacity>
+        </View>
+
+        <FlatList
+          style={styles.content}
+          contentContainerStyle={{ paddingBottom: 100 }}
+          data={[]} // Using ListHeaderComponent for content to allow scrolling if needed
+          renderItem={null}
+          ListHeaderComponent={
+            <>
+              {/* Adults */}
+              {renderNumberPicker('Adults', adults, setAdults, 1, 7, 'adult')}
+
+              {/* Kids */}
+              {renderNumberPicker('Kids', childrenCount, handleChildrenCountChange, 0, 7, 'kid')}
+
+              {/* Child Ages */}
+              {childAges.map((age, index) => (
+                <View key={`age-${index}`}>
+                  {renderNumberPicker(
+                    index === 0 ? 'How old is first child?' :
+                      index === 1 ? 'How old is second child?' :
+                        `How old is child ${index + 1}?`,
+                    age,
+                    (val) => handleAgeChange(index, val),
+                    0, 14,
+                    `age-${index}`
+                  )}
+                </View>
+              ))}
+            </>
+          }
+        />
+
+        {/* Footer */}
+        <View style={styles.footer}>
+          <TouchableOpacity style={styles.saveButton} onPress={handleConfirm}>
+            <Text style={styles.saveButtonText}>Save</Text>
+          </TouchableOpacity>
+        </View>
+
       </View>
     </Modal>
   );
@@ -67,54 +144,67 @@ const GuestPicker = ({ onClose, onGuestSelected }) => {
 export default GuestPicker;
 
 const styles = StyleSheet.create({
-  backdrop: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.5)',
+  container: {
+    flex: 1,
   },
-  modal: {
-    position: 'absolute',
-    bottom: 0,
-    width: Dimensions.get('window').width,
-    backgroundColor: '#1C222C',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    padding: 20,
-    gap: 16,
+  header: {
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    alignItems: 'flex-start',
   },
-  title: {
-    color: 'white',
-    fontSize: 18,
-    marginBottom: 4,
+  closeBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  pickerContainer: {
-    gap: 8,
+  content: {
+    flex: 1,
+  },
+  sectionContainer: {
+    marginTop: 24,
+    paddingLeft: 20,
   },
   label: {
-    color: 'white',
     fontSize: 16,
+    fontFamily: 'Raleway',
+    marginBottom: 16,
   },
-  option: {
-    backgroundColor: '#2A2F3A',
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderRadius: 12,
+  circleOption: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: 'transparent',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  selectedOption: {
-    backgroundColor: '#3E6FFF',
+  selectedCircle: {
+    backgroundColor: '#0066FF', // Bright blue
   },
   optionText: {
-    color: 'white',
-    fontSize: 16,
+    fontSize: 18,
+    fontFamily: 'Raleway',
   },
-  button: {
-    marginTop: 12,
-    backgroundColor: '#3E6FFF',
-    padding: 14,
-    borderRadius: 10,
+  selectedOptionText: {
+    color: '#fff',
+    fontWeight: 'bold',
+  },
+  footer: {
+    paddingHorizontal: 20,
+    paddingVertical: 20,
+  },
+  saveButton: {
+    backgroundColor: '#0066FF',
+    borderRadius: 30, // Pill shape
+    paddingVertical: 16,
     alignItems: 'center',
   },
-  buttonText: {
-    color: 'white',
-    fontWeight: 'bold',
+  saveButtonText: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '600',
+    fontFamily: 'Raleway',
   },
 });

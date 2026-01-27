@@ -1,12 +1,10 @@
 import {
-  Raleway_400Regular,
-  Raleway_600SemiBold,
-  Raleway_700Bold,
-  useFonts,
+  Raleway_400Regular, Raleway_600SemiBold, Raleway_700Bold, useFonts,
 } from '@expo-google-fonts/raleway';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
+import { BlurView } from 'expo-blur';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import React, {
@@ -20,6 +18,7 @@ import {
   ActivityIndicator,
   Alert,
   Animated,
+  Dimensions,
   FlatList,
   Image,
   Keyboard,
@@ -38,13 +37,12 @@ import {
 import {
   useSafeAreaInsets,
 } from 'react-native-safe-area-context';
+import { useTheme } from '../../context/ThemeContext';
+import { supabase } from '../../lib/supabase';
 
 import DatePickerSheet from '../../components/DatePickerSheet';
 import GuestPicker from '../../components/GuestPicker';
 
-import MenuIcon from '@/assets/icons/Menu.svg';
-import NewIcon from '@/assets/icons/New.svg';
-import Logo from '@/assets/images/Logo.svg';
 
 // --- Constants & Helpers ---
 
@@ -71,14 +69,19 @@ const CHAT_ENDPOINT = `${CHAT_API_BASE.replace(/\/$/, '')}/travel`;
 // --- Helper: Fix Icon Names ---
 const getWeatherIconName = (rawIcon) => {
   if (!rawIcon || typeof rawIcon !== 'string') return 'sunny-outline';
-  const lower = rawIcon.toLowerCase();
+  const lower = rawIcon.toLowerCase().replace('_', '-'); // Normalize _ to -
+
   if (lower.includes('rain')) return 'rainy-outline';
+  if (lower.includes('partly') && lower.includes('cloud')) return 'partly-sunny-outline'; // Specific common case
   if (lower.includes('cloud')) return 'cloudy-outline';
   if (lower.includes('snow')) return 'snow-outline';
   if (lower.includes('thunder')) return 'thunderstorm-outline';
   if (lower.includes('clear') || lower.includes('sun')) return 'sunny-outline';
   if (lower.includes('partly')) return 'partly-sunny-outline';
-  if (!/^[a-zA-Z]+$/.test(lower)) return 'sunny-outline';
+
+  // If normalization left us with "partly-cloudy", it's covered above.
+  // Last resort:
+  if (!/^[a-zA-Z-]+$/.test(lower)) return 'sunny-outline'; // Allow hyphens
   return `${lower}-outline`;
 };
 
@@ -98,11 +101,19 @@ async function saveSessionToStorage(messages, currentSessionId) {
     const stored = await AsyncStorage.getItem(SESSION_STORAGE_KEY);
     let sessions = stored ? JSON.parse(stored) : {};
 
+    if (sessions[currentSessionId]) {
+      // Preserve custom title if set
+      if (sessions[currentSessionId].customTitle) {
+        preview = sessions[currentSessionId].preview;
+      }
+    }
+
     sessions[currentSessionId] = {
       id: currentSessionId,
-      preview: preview.substring(0, 30) + '...',
+      preview: preview.substring(0, 30) + (sessions[currentSessionId]?.customTitle ? '' : '...'),
       timestamp: sessions[currentSessionId]?.timestamp || Date.now(),
       messages,
+      customTitle: sessions[currentSessionId]?.customTitle || false,
     };
 
     await AsyncStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sessions));
@@ -219,12 +230,89 @@ const HistoryDrawer = ({
   onClose,
   onLoadSession,
   onDeleteSession,
+  onSetChatTitle,
   topInset,
+  currentSessionId,
 }) => {
+  const { colors, theme } = useTheme();
   const [sessions, setSessions] = useState([]);
+  const [user, setUser] = useState(null);
+  const router = useRouter();
+
+  // Context Menu State
+  const [menuVisible, setMenuVisible] = useState(false);
+  const [selectedItem, setSelectedItem] = useState(null);
+  const [menuPosition, setMenuPosition] = useState({ x: 0, y: 0 });
+
+  const handleLongPress = (event, item) => {
+    const { pageY } = event.nativeEvent;
+    // Position menu near the touch, adjusting if too low
+    setMenuPosition({ x: 60, y: Math.min(pageY - 50, Dimensions.get('window').height - 200) });
+    setSelectedItem(item);
+    setMenuVisible(true);
+  };
+
+  const handleRename = () => {
+    setMenuVisible(false);
+    if (Platform.OS === 'ios') {
+      Alert.prompt(
+        'Rename Chat',
+        'Enter a new name for this chat',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Save',
+            onPress: async (newName) => {
+              if (newName?.trim()) {
+                const stored = await AsyncStorage.getItem(SESSION_STORAGE_KEY);
+                const allSessions = stored ? JSON.parse(stored) : {};
+                if (allSessions[selectedItem.id]) {
+                  allSessions[selectedItem.id].preview = newName.trim();
+                  allSessions[selectedItem.id].customTitle = true; // Flag to prevent overwrite
+                  // Update current header if it's the active chat
+                  if (selectedItem.id === currentSessionId) {
+                    onSetChatTitle(newName.trim());
+                  }
+
+                  await AsyncStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(allSessions));
+                  // Refresh specific item in state
+                  setSessions(prev => prev.map(s => s.id === selectedItem.id ? { ...s, preview: newName.trim(), customTitle: true } : s));
+                }
+              }
+            }
+          }
+        ],
+        'plain-text',
+        selectedItem.preview
+      );
+    } else {
+      Alert.alert('Not Supported', 'Renaming is only available on iOS currently.');
+    }
+  };
+
+  const handleDelete = () => {
+    setMenuVisible(false);
+    Alert.alert(
+      'Delete Chat',
+      'Are you sure you want to delete this chat?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            onDeleteSession(selectedItem.id);
+            setSessions(prev => prev.filter(s => s.id !== selectedItem.id));
+          }
+        }
+      ]
+    );
+  };
+
 
   useEffect(() => {
     if (visible) {
+      // Load Sessions
       AsyncStorage.getItem(SESSION_STORAGE_KEY).then((res) => {
         if (res) {
           const parsed = JSON.parse(res);
@@ -236,83 +324,162 @@ const HistoryDrawer = ({
           setSessions([]);
         }
       });
+      // Load User
+      supabase.auth.getUser().then(({ data: { user } }) => {
+        if (user) setUser(user);
+      });
     }
   }, [visible]);
 
   if (!visible) return null;
 
   return (
+
     <Modal
       visible={visible}
-      animationType="slide"
+      animationType="fade"
       onRequestClose={onClose}
       transparent
     >
       <View style={styles.drawerOverlay}>
-        <View style={[styles.drawerContent, { paddingTop: topInset + 10 }]}>
-          <View style={styles.drawerHeader}>
-            <Text style={styles.drawerTitle}>Saved Trips</Text>
-            <TouchableOpacity onPress={onClose}>
-              <Ionicons name="close" size={24} color="#fff" />
+        <BlurView intensity={90} tint={theme === 'dark' ? "dark" : "light"} style={[styles.drawerBlur, { backgroundColor: theme === 'light' ? 'rgba(255,255,255,0.9)' : 'rgba(14, 20, 28, 0.95)' }]}>
+          <View style={[styles.drawerHeader, { paddingTop: topInset || 10, borderBottomColor: colors.divider }]}>
+            <TouchableOpacity
+              onPress={onClose}
+              style={[styles.circleBtn, { backgroundColor: colors.pillBackground, borderColor: colors.pillBorder }]}
+            >
+              <Ionicons name="close" size={24} color={colors.text} />
+            </TouchableOpacity>
+
+            <View style={[styles.historyPill, { backgroundColor: colors.pillBackground, borderColor: colors.pillBorder }]}>
+              <Text style={[styles.historyPillText, { color: colors.text }]}>Chats History</Text>
+            </View>
+
+            <TouchableOpacity
+              onPress={() => {
+                onClose();
+              }}
+              style={[styles.circleBtn, { backgroundColor: colors.pillBackground, borderColor: colors.pillBorder }]}
+            >
+              <Ionicons name="create-outline" size={24} color={colors.text} />
             </TouchableOpacity>
           </View>
 
           <FlatList
             data={sessions}
             keyExtractor={(item) => item.id}
-            contentContainerStyle={{ padding: 16 }}
+            contentContainerStyle={styles.historyList}
             ListEmptyComponent={
-              <Text
-                style={{
-                  color: '#666',
-                  textAlign: 'center',
-                  marginTop: 20,
-                  fontFamily: 'Raleway',
-                }}
-              >
-                No history yet.
-              </Text>
+              <Text style={[styles.emptyHistoryText, { color: colors.textTertiary }]}>No history yet.</Text>
             }
             renderItem={({ item }) => (
-              <View style={styles.historyItem}>
-                <TouchableOpacity
-                  style={{ flex: 1 }}
-                  onPress={() => onLoadSession(item)}
-                >
-                  <Text
-                    style={styles.historyText}
-                    numberOfLines={1}
-                  >
-                    {item.preview}
-                  </Text>
-                  <Text style={styles.historyDate}>
-                    {new Date(item.timestamp).toLocaleDateString()}
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  onPress={() => {
-                    onDeleteSession(item.id);
-                    setSessions((prev) => prev.filter((s) => s.id !== item.id));
-                  }}
-                  style={{ padding: 10 }}
-                >
-                  <Ionicons
-                    name="trash-outline"
-                    size={20}
-                    color="#ff4444"
-                  />
-                </TouchableOpacity>
-              </View>
+              <TouchableOpacity
+                activeOpacity={0.7}
+                style={[
+                  styles.historyItem,
+                  selectedItem?.id === item.id && menuVisible && { backgroundColor: theme === 'light' ? '#F3F4F6' : '#1F2937', borderRadius: 12 }
+                ]}
+                onPress={() => {
+                  onLoadSession(item);
+                  onSetChatTitle?.(item.preview);
+                }}
+                onLongPress={(e) => handleLongPress(e, item)}
+                delayLongPress={300}
+              >
+                <Text style={[styles.historyText, { color: colors.text }]} numberOfLines={1}>
+                  {item.preview}
+                </Text>
+                <Text style={[styles.historyDate, { color: colors.textTertiary }]}>
+                  {new Date(item.timestamp).toLocaleDateString()}
+                </Text>
+              </TouchableOpacity>
             )}
           />
-        </View>
-        <Pressable style={{ flex: 1 }} onPress={onClose} />
+
+          {/* Context Menu Overlay */}
+          {menuVisible && (
+            <View style={StyleSheet.absoluteFill}>
+              <Pressable style={{ flex: 1 }} onPress={() => setMenuVisible(false)} />
+              <View style={[
+                styles.contextMenu,
+                { top: menuPosition.y, left: 60, right: 60 },
+                theme === 'light' ? {
+                  backgroundColor: '#FFFFFF',
+                  shadowColor: "#000",
+                  shadowOffset: { width: 0, height: 4 },
+                  shadowOpacity: 0.2,
+                  shadowRadius: 10,
+                  elevation: 10
+                } : {
+                  backgroundColor: '#1F2937',
+                  borderWidth: 1,
+                  borderColor: 'rgba(255,255,255,0.1)'
+                }
+              ]}>
+                <TouchableOpacity style={styles.contextMenuItem} onPress={() => { setMenuVisible(false); /* Share Logic */ }}>
+                  <Ionicons name="share-outline" size={20} color={colors.text} />
+                  <Text style={[styles.contextMenuText, { color: colors.text }]}>Share</Text>
+                </TouchableOpacity>
+                <View style={[styles.contextDivider, { backgroundColor: colors.divider }]} />
+                <TouchableOpacity style={styles.contextMenuItem} onPress={handleRename}>
+                  <Ionicons name="pencil-outline" size={20} color={colors.text} />
+                  <Text style={[styles.contextMenuText, { color: colors.text }]}>Rename</Text>
+                </TouchableOpacity>
+                <View style={[styles.contextDivider, { backgroundColor: colors.divider }]} />
+                <TouchableOpacity style={styles.contextMenuItem} onPress={handleDelete}>
+                  <Ionicons name="trash-outline" size={20} color="#EF4444" />
+                  <Text style={[styles.contextMenuText, { color: "#EF4444" }]}>Delete</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
+
+          {/* Profile Bar */}
+          <View style={[
+            styles.profileBar,
+            {
+              backgroundColor: colors.card,
+              borderTopColor: 'transparent',
+              shadowColor: "#000",
+              shadowOffset: { width: 0, height: 2 },
+              shadowOpacity: 0.1,
+              shadowRadius: 8,
+              elevation: 5
+            }
+          ]}>
+            {user?.user_metadata?.avatar_url ? (
+              <Image
+                source={{ uri: user.user_metadata.avatar_url }}
+                style={styles.profileAvatar}
+              />
+            ) : (
+              <View style={[styles.profileAvatar, styles.initialAvatar]}>
+                <Text style={{ color: '#fff', fontWeight: 'bold' }}>
+                  {(user?.user_metadata?.full_name || 'U').charAt(0).toUpperCase()}
+                </Text>
+              </View>
+            )}
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.profileName, { color: colors.text }]}>
+                {user?.user_metadata?.full_name || user?.email?.split('@')[0] || 'Traveler'}
+              </Text>
+            </View>
+            <TouchableOpacity onPress={() => {
+              onClose();
+              router.push('/(tabs)/Profile');
+            }}>
+              <Ionicons name="settings-outline" size={24} color={colors.textSecondary} />
+            </TouchableOpacity>
+          </View>
+        </BlurView>
       </View>
     </Modal>
   );
 };
 
+
 const LoadingIndicator = React.memo(() => {
+  const { colors } = useTheme();
   const [dots, setDots] = useState('.');
   useEffect(() => {
     const i = setInterval(() => {
@@ -322,8 +489,8 @@ const LoadingIndicator = React.memo(() => {
   }, []);
 
   return (
-    <View style={[styles.messageBubble, styles.aiBubble]}>
-      <Text style={styles.loadingText}>{dots}</Text>
+    <View style={[styles.messageBubble, styles.aiBubble, { backgroundColor: colors.card }]}>
+      <Text style={[styles.loadingText, { color: colors.text }]}>{dots}</Text>
     </View>
   );
 });
@@ -361,36 +528,56 @@ const FEATURE_CHIPS = [
   },
 ];
 
-const FeatureChipsBar = React.memo(({ onSelectChip }) => (
-  <View style={styles.chipsWrap}>
-    <FlatList
-      data={FEATURE_CHIPS}
-      keyExtractor={(i) => i.id}
-      horizontal
-      showsHorizontalScrollIndicator={false}
-      contentContainerStyle={styles.chipsContent}
-      ItemSeparatorComponent={() => <View style={{ width: 10 }} />}
-      renderItem={({ item }) => (
-        <TouchableOpacity
-          activeOpacity={0.9}
-          onPress={() => onSelectChip(item)}
-          style={styles.chip}
-        >
-          <View style={styles.chipIcon}>
-            <Ionicons name={item.icon} size={16} color="#C8D1E5" />
-          </View>
-          <View style={{ flexShrink: 1 }}>
-            <Text style={styles.chipTitle}>{item.title}</Text>
-            <Text style={styles.chipSubtitle}>{item.subtitle}</Text>
-          </View>
-        </TouchableOpacity>
-      )}
-    />
-  </View>
-));
+const FeatureChipsBar = React.memo(({ onSelectChip }) => {
+  const { colors, theme } = useTheme();
+  return (
+    <View style={styles.chipsWrap}>
+      <FlatList
+        data={FEATURE_CHIPS.slice(0, 3)} // Show first 3 as per mockup
+        keyExtractor={(i) => i.id}
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.chipsContent}
+        ItemSeparatorComponent={() => <View style={{ width: 12 }} />}
+        renderItem={({ item }) => (
+          <BlurView intensity={20} tint={theme === 'dark' ? "dark" : "light"} style={[styles.chipBlur, { borderRadius: 32, overflow: 'hidden' }]}>
+            <TouchableOpacity
+              activeOpacity={0.8}
+              onPress={() => onSelectChip(item)}
+              style={[
+                styles.chip,
+                { backgroundColor: theme === 'dark' ? 'rgba(255,255,255,0.03)' : '#FFFFFF' },
+                theme === 'dark' && {
+                  // borderWidth: 1, // Removed to avoid double border
+                  // borderColor: 'rgba(255,255,255,0.15)',
+                  shadowColor: "#FFFFFF",
+                  shadowOffset: { width: 0, height: 1 },
+                  shadowOpacity: 0.1,
+                  shadowRadius: 1,
+                },
+                theme === 'light' && {
+                  shadowColor: "#000",
+                  shadowOffset: { width: 0, height: 4 },
+                  shadowOpacity: 0.1,
+                  shadowRadius: 10,
+                  elevation: 5
+                }
+              ]}
+            >
+              <Text style={[styles.chipTitle, { color: colors.text }]}>{item.title}</Text>
+              <Text style={[styles.chipSubtitle, { color: colors.textSecondary }]}>{item.subtitle}</Text>
+            </TouchableOpacity>
+          </BlurView>
+        )}
+      />
+    </View>
+  );
+});
 
 const PlanCard = React.memo(({ payload }) => {
   const router = useRouter();
+  const { colors, theme } = useTheme();
+
   if (!payload) return null;
 
   const {
@@ -424,13 +611,38 @@ const PlanCard = React.memo(({ payload }) => {
   };
 
   useEffect(() => {
-    if (image) Image.prefetch(image).catch(() => {});
+    if (image) Image.prefetch(image).catch(() => { });
   }, [image]);
 
   const imgSource = useMemo(
     () => (image ? { uri: image } : undefined),
     [image]
   );
+
+  const handlePurchase = () => {
+    // Logic from TripDetails.jsx
+    const titleLower = title.toLowerCase();
+    let checkIn = null;
+    let checkOut = null;
+    if (dateRange && dateRange.includes(' to ')) {
+      const parts = dateRange.split(' to ');
+      checkIn = parts[0];
+      checkOut = parts[1];
+    } else if (dateRange && dateRange.includes(' - ')) { // Handle dash format if present
+      const parts = dateRange.split(' - ');
+      checkIn = parts[0];
+      checkOut = parts[1];
+    }
+
+    router.push({
+      pathname: '/TripDetails',
+      params: {
+        plan: JSON.stringify(payload),
+        openPayment: 'true' // Pass param to auto-open payment if possible, or just navigate to details then they click buy
+      }
+    });
+  };
+
   const routerParams = useMemo(
     () => ({
       pathname: '/TripDetails',
@@ -439,8 +651,20 @@ const PlanCard = React.memo(({ payload }) => {
     [payload]
   );
 
+
   return (
-    <View style={styles.cardContainer}>
+    <View style={[
+      styles.cardContainer,
+      { backgroundColor: colors.card, borderColor: colors.cardBorder },
+      theme === 'light' && {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.1,
+        shadowRadius: 10,
+        elevation: 4,
+        borderWidth: 0
+      }
+    ]}>
       {imgSource && (
         <Image
           source={imgSource}
@@ -452,59 +676,63 @@ const PlanCard = React.memo(({ payload }) => {
       <View style={styles.cardContent}>
         <View style={styles.pcRowBetween}>
           <Text
-            style={styles.pcTitle}
+            style={[styles.pcTitle, { color: colors.text }]}
             numberOfLines={1}
           >
             {title}
           </Text>
           {tempReadable && (
-            <View style={styles.pcWeatherPill}>
-              <Ionicons name={weatherIcon} size={16} color="#FFD166" />
-              <Text style={styles.pcWeatherText}>{tempReadable}</Text>
+            <View style={[styles.pcWeatherPill, { backgroundColor: theme === 'light' ? 'rgba(0,0,0,0.05)' : 'rgba(255,255,255,0.1)' }]}>
+              <Ionicons name={weatherIcon} size={18} color={theme === 'light' ? colors.text : "#FFD166"} />
+              <Text style={[styles.pcWeatherText, { color: colors.text }]}>{tempReadable}</Text>
             </View>
           )}
         </View>
+
         {dateRange ? (
-          <Text style={styles.pcDates}>{dateRange}</Text>
+          <Text style={[styles.pcDates, { color: colors.textSecondary }]}>{dateRange}</Text>
         ) : null}
+
         {!!description && (
           <Text
-            style={styles.pcDesc}
+            style={[styles.pcDesc, { color: colors.textTertiary }]}
             numberOfLines={3}
           >
             {description}
           </Text>
         )}
-        {!!price && (
-          <>
-            <Text style={styles.pcPriceLabel}>Total price:</Text>
-            <Text style={styles.pcPriceValue}>{formatPrice(price)}</Text>
-          </>
-        )}
+
+        <View style={{ marginTop: 12 }}>
+          <Text style={[styles.pcPriceLabel, { color: colors.textSecondary }]}>Total price:</Text>
+          <Text style={[styles.pcPriceValue, { color: colors.text }]}>{formatPrice(price)}</Text>
+        </View>
+
         <View style={styles.pcActions}>
-          <TouchableOpacity activeOpacity={0.9} style={styles.pcSquareBtn}>
-            <Ionicons name="share-outline" size={18} color="#AFC1D8" />
+          <TouchableOpacity
+            activeOpacity={0.9}
+            style={[styles.pcSquareBtn, { backgroundColor: theme === 'light' ? '#E5E7EB' : '#232C38' }]}
+          >
+            <Ionicons name="share-outline" size={20} color={colors.text} />
           </TouchableOpacity>
-          <TouchableOpacity activeOpacity={0.9} style={styles.pcSquareBtn}>
-            <Ionicons name="heart-outline" size={18} color="#AFC1D8" />
-          </TouchableOpacity>
+
           <TouchableOpacity
             activeOpacity={0.9}
             style={[
               styles.pcInfoBtn,
               !hasDetails && styles.pcInfoBtnDisabled,
+              { backgroundColor: theme === 'light' ? '#E5E7EB' : '#232C38' }
             ]}
             disabled={!hasDetails}
             onPress={() => router.push(routerParams)}
           >
-            <Ionicons
-              name="information-circle-outline"
-              size={24}
-              color="#C9D5E9"
-            />
-            <Text style={styles.pcInfoText}>Info</Text>
+            <Text style={[styles.pcInfoText, { color: colors.text }]}>Info</Text>
           </TouchableOpacity>
-          <TouchableOpacity activeOpacity={0.95} style={styles.pcBuyBtn}>
+
+          <TouchableOpacity
+            activeOpacity={0.95}
+            style={[styles.pcBuyBtn, { backgroundColor: '#3E6FFF' }]}
+            onPress={handlePurchase}
+          >
             <Text style={styles.pcBuyText}>Buy</Text>
           </TouchableOpacity>
         </View>
@@ -518,6 +746,7 @@ const PlanCard = React.memo(({ payload }) => {
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const tabBarHeight = useBottomTabBarHeight();
+  const { colors, theme } = useTheme(); // Theme Hook
 
   // Load Fonts
   const [fontsLoaded] = useFonts({
@@ -528,6 +757,8 @@ export default function HomeScreen() {
 
   const [messages, setMessages] = useState([WELCOME_MESSAGE]);
   const [currentSessionId, setCurrentSessionId] = useState(null);
+  const [chatTitle, setChatTitle] = useState('New Chat'); // Default Title
+
 
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [showGuestPicker, setShowGuestPicker] = useState(false);
@@ -548,9 +779,13 @@ export default function HomeScreen() {
 
   const HEADER_HEIGHT = 60;
   const keyboardVerticalOffset = 0;
+  /*
+    Tab Bar is hidden now, so we manually ensure space.
+    Standard floating input look: insets.bottom + ~20px
+  */
   const bottomPadding = isKeyboardVisible
-    ? insets.bottom || 6
-    : tabBarHeight || insets.bottom || 10;
+    ? insets.bottom || 10
+    : (insets.bottom || 20) + 20;
 
   // Keyboard visibility
   useEffect(() => {
@@ -602,11 +837,23 @@ export default function HomeScreen() {
           const next = [...prevWithoutLoading];
 
           if (assistantMessage) {
+            let finalText = assistantMessage.content;
+            let actionType = null;
+            if (!finalText && signal?.type === 'dateNeeded') {
+              finalText = "Select Dates";
+              actionType = 'date';
+            }
+            if (!finalText && signal?.type === 'guestsNeeded') {
+              finalText = "Who is going?";
+              actionType = 'guests';
+            }
+
             next.push({
               ...assistantMessage,
-              id:
-                assistantMessage.id ||
-                generateUniqueId('api-ai-response'),
+              content: finalText || assistantMessage.content,
+              actionType,
+              // unique ID logic
+              id: assistantMessage.id || generateUniqueId('api-ai-response'),
             });
           } else if (aiText) {
             next.push({
@@ -723,9 +970,8 @@ export default function HomeScreen() {
           {
             type: 'image_url',
             image_url: {
-              url: `data:${asset.mimeType ?? 'image/jpeg'};base64,${
-                asset.base64
-              }`,
+              url: `data:${asset.mimeType ?? 'image/jpeg'};base64,${asset.base64
+                }`,
             },
           },
         ],
@@ -848,7 +1094,7 @@ export default function HomeScreen() {
       e.nativeEvent;
     atBottomRef.current =
       contentSize.height -
-        (contentOffset.y + layoutMeasurement.height) <
+      (contentOffset.y + layoutMeasurement.height) <
       40;
   }, []);
 
@@ -902,11 +1148,27 @@ export default function HomeScreen() {
       textContent = item.content;
     }
 
+    const isAction = !!item.actionType;
+    const BubbleComponent = isAction ? TouchableOpacity : View;
+
     return (
-      <View
+      <BubbleComponent
+        activeOpacity={0.7}
+        onPress={() => {
+          if (item.actionType === 'date') openSheetNow('date');
+          if (item.actionType === 'guests') openSheetNow('guests');
+        }}
         style={[
           styles.messageBubble,
-          role === 'user' ? styles.userBubble : styles.aiBubble,
+          role === 'user' ? styles.userBubble : [styles.aiBubble, { backgroundColor: colors.card }],
+          isAction && { borderWidth: 1, borderColor: colors.primary, flexDirection: 'row', alignItems: 'center', gap: 8 },
+          theme === 'light' && {
+            shadowColor: "#000",
+            shadowOffset: { width: 0, height: 2 },
+            shadowOpacity: 0.05,
+            shadowRadius: 4,
+            elevation: 2
+          }
         ]}
       >
         {imageUrl && (
@@ -920,64 +1182,95 @@ export default function HomeScreen() {
             }}
           />
         )}
-        <Text style={styles.messageText}>{textContent}</Text>
-      </View>
+        <Text style={[styles.messageText, role !== 'user' && { color: colors.text }]}>{textContent}</Text>
+        {isAction && <Ionicons name="chevron-down" size={18} color={colors.text} />}
+      </BubbleComponent>
     );
-  }, []);
+  }, [colors]);
 
   if (!fontsLoaded) {
     return (
-      <View style={styles.welcomeContainer}>
+      <View style={[styles.welcomeContainer, { backgroundColor: colors.background }]}>
         <ActivityIndicator color="#3E6FFF" />
       </View>
     );
   }
 
   return (
-    <View
-      style={[
-        styles.container,
-        { paddingTop: insets.top },
-      ]}
-    >
+    <View style={[styles.container, { paddingTop: insets.top, backgroundColor: colors.background }]}>
       <KeyboardAvoidingView
         style={styles.flex}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={keyboardVerticalOffset}
       >
         {/* Header */}
-        <View
-          style={[
-            styles.headerBar,
-            { height: HEADER_HEIGHT },
-          ]}
-        >
+        <View style={[styles.headerBar, { height: HEADER_HEIGHT }]}>
           <TouchableOpacity
-            activeOpacity={0.8}
+            activeOpacity={0.7}
+            style={[
+              styles.circleBtn,
+              { backgroundColor: colors.pillBackground, borderColor: colors.pillBorder },
+              theme === 'light' && {
+                backgroundColor: '#FFFFFF',
+                borderColor: '#F3F4F6',
+                shadowColor: "#000",
+                shadowOffset: { width: 0, height: 2 },
+                shadowOpacity: 0.05,
+                shadowRadius: 6,
+                elevation: 3
+              }
+            ]}
             onPress={() => setShowHistory(true)}
           >
-            <MenuIcon width={26} height={26} />
+            <Ionicons name="menu-outline" size={24} color={colors.text} />
           </TouchableOpacity>
-          <Text style={styles.headerBarText}>Chat</Text>
+
+          <View style={[
+            styles.newChatPill,
+            { backgroundColor: colors.pillBackground, borderColor: colors.pillBorder },
+            theme === 'light' && {
+              backgroundColor: '#FFFFFF',
+              borderColor: '#F3F4F6',
+              shadowColor: "#000",
+              shadowOffset: { width: 0, height: 2 },
+              shadowOpacity: 0.05,
+              shadowRadius: 6,
+              elevation: 3
+            }
+          ]}>
+            <Text style={[styles.newChatText, { color: colors.textTertiary }]} numberOfLines={1}>
+              {chatTitle}
+            </Text>
+          </View>
+
           <TouchableOpacity
-            activeOpacity={0.8}
+            activeOpacity={0.7}
+            style={[
+              styles.circleBtn,
+              { backgroundColor: colors.pillBackground, borderColor: colors.pillBorder },
+              theme === 'light' && {
+                backgroundColor: '#FFFFFF',
+                borderColor: '#F3F4F6',
+                shadowColor: "#000",
+                shadowOffset: { width: 0, height: 2 },
+                shadowOpacity: 0.05,
+                shadowRadius: 6,
+                elevation: 3
+              }
+            ]}
             onPress={() => {
               Keyboard.dismiss();
               setMessages([WELCOME_MESSAGE]);
               setCurrentSessionId(null);
+              setChatTitle('New Chat'); // Reset Title
             }}
           >
-            <NewIcon width={24} height={24} />
+            <Ionicons name="create-outline" size={22} color={colors.text} />
           </TouchableOpacity>
         </View>
 
         {/* Body */}
-        <View
-          style={[
-            styles.body,
-            { paddingBottom: bottomPadding },
-          ]}
-        >
+        <View style={[styles.body, { paddingBottom: bottomPadding }]}>
           <View style={styles.chatContainer}>
             {focused && chatStarted && (
               <Pressable
@@ -987,18 +1280,14 @@ export default function HomeScreen() {
             )}
 
             {!chatStarted ? (
-              <TouchableWithoutFeedback
-                onPress={collapseInput}
-              >
+              <TouchableWithoutFeedback onPress={collapseInput}>
                 <View style={styles.welcomeContainer}>
-                  <View style={{ marginBottom: 20 }}>
-                    <Logo width={75} height={38} />
-                  </View>
-                  <Text style={styles.title}>
-                    Hi there! I'm your AI Travel Assistant
+                  <Text style={styles.logoText}>NÜVIA</Text>
+                  <Text style={[styles.welcomeText, { color: colors.text }]}>
+                    Welcome. I'll take care of your journey.
                   </Text>
-                  <Text style={styles.subtitle}>
-                    Where would you like to go today?
+                  <Text style={[styles.subtitleText, { color: colors.textTertiary }]}>
+                    Where shall we begin your journey today?
                   </Text>
                 </View>
               </TouchableWithoutFeedback>
@@ -1009,9 +1298,7 @@ export default function HomeScreen() {
                 keyExtractor={(item) => item.id}
                 renderItem={renderMessage}
                 contentContainerStyle={styles.chatContent}
-                ListFooterComponent={
-                  <View style={{ height: 12 }} />
-                }
+                ListFooterComponent={<View style={{ height: 12 }} />}
                 keyboardShouldPersistTaps="handled"
                 showsVerticalScrollIndicator={false}
                 onScroll={updateAtBottom}
@@ -1031,135 +1318,71 @@ export default function HomeScreen() {
           </View>
 
           {/* Input + Chips */}
-          <View style={styles.inputArea}>
+          <View style={styles.bottomSection}>
             {!chatStarted && (
-              <FeatureChipsBar
-                onSelectChip={handleChipSelect}
-              />
+              <FeatureChipsBar onSelectChip={handleChipSelect} />
             )}
 
-            <Animated.View
-              style={[
-                styles.inputContainer,
-                {
-                  height: inputHeight,
-                  flexDirection: expanded
-                    ? 'column'
-                    : 'row',
-                  alignItems: expanded
-                    ? 'stretch'
-                    : 'center',
-                },
-              ]}
-            >
-              {!expanded ? (
-                <>
-                  <TouchableOpacity
-                    style={[styles.iconBtn, { marginRight: 8 }]}
-                    onPress={() => setShowActionSheet(true)}
-                  >
-                    <Ionicons
-                      name="add"
-                      size={22}
-                      color="#fff"
-                    />
-                  </TouchableOpacity>
+            <BlurView intensity={theme === 'dark' ? 30 : 0} tint={theme === 'dark' ? "dark" : "light"} style={[
+              styles.inputContainerBlur,
+              { borderColor: theme === 'dark' ? 'rgba(255,255,255,0.2)' : colors.divider },
+              theme === 'dark' && {
+                backgroundColor: 'rgba(255,255,255,0.05)',
+                shadowColor: "#FFFFFF",
+                shadowOffset: { width: 0, height: 0 },
+                shadowOpacity: 0.1,
+                shadowRadius: 4,
+              },
+              theme === 'light' && {
+                backgroundColor: '#FFFFFF',
+                borderWidth: 0,
+                shadowColor: "#000",
+                shadowOffset: { width: 0, height: 4 },
+                shadowOpacity: 0.08,
+                shadowRadius: 10,
+                elevation: 5
+              }
+            ]}>
+              <View style={[
+                styles.inputInner,
+                { backgroundColor: colors.inputBackground },
+                theme === 'light' && { backgroundColor: 'transparent' }
+              ]}>
+                <TouchableOpacity
+                  style={styles.plusBtn}
+                  onPress={() => setShowActionSheet(true)}
+                >
+                  <Ionicons name="add" size={28} color={theme === 'dark' ? "#D1D5DB" : "#6B7280"} />
+                </TouchableOpacity>
 
-                  <TextInput
-                    ref={inputRef}
-                    placeholder="Plan trip / Paste link"
-                    placeholderTextColor="#aaa"
-                    value={inputValue}
-                    onChangeText={setInputValue}
-                    style={styles.inlineInput}
-                    multiline={false}
-                    onFocus={() => setFocused(true)}
-                    onBlur={() => setFocused(false)}
-                    onSubmitEditing={() =>
-                      sendUser(inputValue)
-                    }
-                    blurOnSubmit
-                  />
+                <TextInput
+                  ref={inputRef}
+                  placeholder="Plan your trip"
+                  placeholderTextColor={colors.textTertiary}
+                  value={inputValue}
+                  onChangeText={setInputValue}
+                  style={[styles.glassInput, { color: colors.text }]}
+                  multiline={false}
+                  onFocus={() => setFocused(true)}
+                  onBlur={() => setFocused(false)}
+                  onSubmitEditing={() => sendUser(inputValue)}
+                  blurOnSubmit
+                />
 
-                  {inputValue.trim().length === 0 ? (
-                    <TouchableOpacity
-                      style={[
-                        styles.iconBtn,
-                        { marginLeft: 8 },
-                      ]}
-                    >
-                      <Ionicons
-                        name="mic-outline"
-                        size={20}
-                        color="#fff"
-                      />
-                    </TouchableOpacity>
-                  ) : (
-                    <TouchableOpacity
-                      style={[
-                        styles.iconBtn,
-                        styles.sendFilled,
-                        { marginLeft: 8, height: 40, width: 40 },
-                      ]}
-                      onPress={() => sendUser(inputValue)}
-                    >
-                      <Ionicons
-                        name="arrow-up"
-                        size={24}
-                        color="#fff"
-                      />
-                    </TouchableOpacity>
-                  )}
-                </>
-              ) : (
-                <>
-                  <TextInput
-                    ref={inputRef}
-                    placeholder="Plan your trip"
-                    placeholderTextColor="#a0a0a0"
-                    value={inputValue}
-                    onChangeText={setInputValue}
-                    style={styles.textArea}
-                    multiline
-                    onFocus={() => setFocused(true)}
-                    onBlur={() => setFocused(false)}
+                <TouchableOpacity
+                  onPress={() => inputValue.trim().length > 0 ? sendUser(inputValue) : console.log('Mic pressed')}
+                  style={styles.micBtn}
+                >
+                  <Ionicons
+                    name={inputValue.trim().length > 0 ? "arrow-up-circle" : "mic-outline"}
+                    size={inputValue.trim().length > 0 ? 32 : 24}
+                    color={inputValue.trim().length > 0 ? "#3E6FFF" : (theme === 'dark' ? "#D1D5DB" : "#6B7280")}
                   />
-                  <View
-                    style={[
-                      styles.iconsRow,
-                      { marginTop: 8 },
-                    ]}
-                  >
-                    <TouchableOpacity
-                      style={styles.iconBtn}
-                      onPress={() =>
-                        setShowActionSheet(true)
-                      }
-                    >
-                      <Ionicons
-                        name="add"
-                        size={22}
-                        color="#fff"
-                      />
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={[
-                        styles.iconBtn,
-                        styles.sendFilled,
-                        { height: 40, width: 40 },
-                      ]}
-                      onPress={() => sendUser(inputValue)}
-                    >
-                      <Ionicons
-                        name="arrow-up"
-                        size={24}
-                        color="#fff"
-                      />
-                    </TouchableOpacity>
-                  </View>
-                </>
-              )}
-            </Animated.View>
+                </TouchableOpacity>
+              </View>
+            </BlurView>
+
+            <View style={{ height: 10 }} />
           </View>
         </View>
       </KeyboardAvoidingView>
@@ -1169,13 +1392,16 @@ export default function HomeScreen() {
           onClose={() => setShowDatePicker(false)}
           onDateSelected={onDatesSelected}
         />
-      )}
-      {showGuestPicker && (
-        <GuestPicker
-          onClose={() => setShowGuestPicker(false)}
-          onGuestSelected={onGuestSelected}
-        />
-      )}
+      )
+      }
+      {
+        showGuestPicker && (
+          <GuestPicker
+            onClose={() => setShowGuestPicker(false)}
+            onGuestSelected={onGuestSelected}
+          />
+        )
+      }
 
       <ActionSheet
         visible={showActionSheet}
@@ -1210,79 +1436,187 @@ export default function HomeScreen() {
               WELCOME_MESSAGE,
             ]);
             setCurrentSessionId(null);
+            setChatTitle('New Chat');
           }
         }}
+        onSetChatTitle={setChatTitle}
+        currentSessionId={currentSessionId}
       />
-    </View>
+    </View >
   );
 }
 
 // --- Styles ---
 const styles = StyleSheet.create({
   flex: { flex: 1 },
-  container: { flex: 1, backgroundColor: '#0E141C' },
+  container: { flex: 1, backgroundColor: '#0E1116' }, // Darker background
+
+  // Header
   headerBar: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    backgroundColor: '#0E141C',
+    paddingHorizontal: 20,
+    marginTop: 10,
+    zIndex: 10,
   },
-  headerBarText: {
-    color: 'white',
-    fontSize: 18,
-    fontWeight: '600',
-    fontFamily: 'RalewayBold',
+  circleBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+    backgroundColor: '#161B23', // Slightly lighter than bg
+    alignItems: 'center',
+    justifyContent: 'center',
   },
+  newChatPill: {
+    paddingHorizontal: 24,
+    paddingVertical: 10,
+    borderRadius: 30,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+    backgroundColor: '#161B23',
+  },
+  newChatText: {
+    color: '#D1D5DB',
+    fontSize: 16,
+    fontFamily: 'Raleway',
+    letterSpacing: 0.5,
+  },
+
   body: { flex: 1 },
   chatContainer: { flex: 1, justifyContent: 'center' },
+
+  // Welcome Area
   welcomeContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    marginBottom: 60,
   },
-  title: {
-    fontSize: 20,
-    color: 'white',
-    marginBottom: 10,
-    textAlign: 'center',
-    paddingHorizontal: 20,
+  logoText: {
+    color: '#3E6FFF',
+    fontSize: 42,
     fontFamily: 'RalewayBold',
+    letterSpacing: 1,
+    marginBottom: 16,
+    textShadowColor: 'rgba(62, 111, 255, 0.4)',
+    textShadowOffset: { width: 0, height: 4 },
+    textShadowRadius: 10,
   },
-  subtitle: {
+  welcomeText: {
+    color: '#FFFFFF',
     fontSize: 18,
-    color: 'rgba(255, 255, 255, 0.37)',
+    fontFamily: 'RalewaySemiBold',
     textAlign: 'center',
-    paddingHorizontal: 20,
-    fontFamily: 'Raleway',
+    marginBottom: 8,
   },
+  subtitleText: {
+    color: '#6B7280', // Grey text
+    fontSize: 15,
+    fontFamily: 'Raleway',
+    textAlign: 'center',
+  },
+
+  // Chat List
   chatContent: {
     paddingHorizontal: 16,
     paddingTop: 16,
   },
-  inputArea: {
+
+  // Bottom Section
+  bottomSection: {
     paddingHorizontal: 20,
-    backgroundColor: '#0E141C',
+    justifyContent: 'flex-end',
   },
+
+  // Chips
+  chipsWrap: { marginBottom: 20 },
+  chipsContent: { paddingHorizontal: 4 },
+  chipBlur: {
+    borderRadius: 24,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+  },
+  chip: {
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    alignItems: 'flex-start',
+    width: 170, // Increased width to fit "Instant Booking" on one line
+    height: 64,
+    justifyContent: 'center',
+  },
+  chipTitle: {
+    color: '#E8EDF7',
+    fontSize: 15,
+    fontFamily: 'RalewaySemiBold',
+    marginBottom: 4,
+  },
+  chipSubtitle: {
+    color: '#9CA3AF',
+    fontSize: 12,
+    fontFamily: 'Raleway',
+  },
+
+  // Input
+  inputContainerBlur: {
+    width: '100%',
+    borderRadius: 30,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+  },
+  inputInner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8, // Taller pill
+    paddingHorizontal: 6,
+    backgroundColor: 'rgba(20, 25, 33, 0.7)',
+  },
+  plusBtn: {
+    width: 40,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  glassInput: {
+    flex: 1,
+    color: '#fff',
+    fontSize: 16,
+    fontFamily: 'Raleway',
+    paddingHorizontal: 10,
+    height: 40,
+  },
+  micBtn: {
+    width: 40,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 4,
+  },
+
+  // Messages (Legacy but kept for chat flow)
   messageBubble: {
     maxWidth: '85%',
     paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: 14,
+    paddingHorizontal: 16,
+    borderRadius: 18,
     marginVertical: 6,
   },
   userBubble: {
     alignSelf: 'flex-end',
-    backgroundColor: '#1A2028',
+    backgroundColor: '#3E6FFF', // Blue for user
   },
   aiBubble: {
     alignSelf: 'flex-start',
-    backgroundColor: '#1e2a3a0c',
+    backgroundColor: '#232C38',
   },
   messageText: {
     color: '#fff',
     fontSize: 16,
-    lineHeight: 20,
+    lineHeight: 22,
     fontFamily: 'Raleway',
   },
   loadingText: {
@@ -1291,24 +1625,26 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     fontFamily: 'Raleway',
   },
+
+  // Plan Card
   cardContainer: {
     width: '100%',
-    backgroundColor: '#0F1722',
-    borderRadius: 16,
+    backgroundColor: '#161B23',
+    borderRadius: 20,
     overflow: 'hidden',
     marginVertical: 8,
     borderWidth: 1,
-    borderColor: '#1E2A3A',
+    borderColor: '#232C38',
   },
-  cardImage: { width: '100%', height: 150 },
-  cardContent: { padding: 12 },
+  cardImage: { width: '100%', height: 160 },
+  cardContent: { padding: 16 },
   pcRowBetween: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
   },
   pcTitle: {
-    color: '#EAF2FF',
+    color: '#fff',
     fontSize: 18,
     fontWeight: '700',
     flexShrink: 1,
@@ -1319,58 +1655,53 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    backgroundColor: '#132233',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
     borderRadius: 12,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#22354B',
   },
   pcWeatherText: {
-    color: '#E6F0FF',
+    color: '#fff',
     fontSize: 12,
-    fontWeight: '600',
     fontFamily: 'RalewaySemiBold',
   },
   pcDates: {
-    color: '#94A3B8',
-    marginTop: 4,
+    color: '#9CA3AF',
+    marginTop: 6,
     marginBottom: 8,
-    fontSize: 12,
+    fontSize: 13,
     fontFamily: 'Raleway',
   },
   pcDesc: {
-    color: '#C9D5E9',
-    fontSize: 13,
-    lineHeight: 18,
+    color: '#D1D5DB',
+    fontSize: 14,
+    lineHeight: 20,
     fontFamily: 'Raleway',
   },
   pcPriceLabel: {
-    color: '#94A3B8',
-    marginTop: 10,
+    color: '#9CA3AF',
+    marginTop: 12,
     fontSize: 12,
     fontFamily: 'Raleway',
   },
   pcPriceValue: {
-    color: '#EAF2FF',
+    color: '#fff',
     fontWeight: '800',
-    fontSize: 20,
+    fontSize: 22,
     marginTop: 2,
     fontFamily: 'RalewayBold',
   },
   pcActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
-    marginTop: 12,
+    gap: 12,
+    marginTop: 16,
   },
   pcSquareBtn: {
-    height: 40,
-    width: 40,
-    borderRadius: 12,
-    backgroundColor: '#1B2636',
-    borderWidth: 1,
-    borderColor: '#27374B',
+    height: 44,
+    width: 44,
+    borderRadius: 14,
+    backgroundColor: '#232C38',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -1379,25 +1710,22 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
-    height: 40,
-    borderRadius: 14,
-    backgroundColor: '#1B2636',
-    borderWidth: 1,
-    borderColor: '#27374B',
+    gap: 8,
+    height: 44,
+    borderRadius: 16,
+    backgroundColor: '#232C38',
   },
-  pcInfoBtnDisabled: { opacity: 0.4 },
+  pcInfoBtnDisabled: { opacity: 0.5 },
   pcInfoText: {
-    color: '#C9D5E9',
+    color: '#fff',
     fontWeight: '700',
-    fontSize: 13,
+    fontSize: 14,
     fontFamily: 'RalewayBold',
   },
   pcBuyBtn: {
     flex: 1,
-    paddingHorizontal: 18,
-    height: 40,
-    borderRadius: 14,
+    height: 44,
+    borderRadius: 16,
     backgroundColor: '#3E6FFF',
     alignItems: 'center',
     justifyContent: 'center',
@@ -1408,150 +1736,144 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontFamily: 'RalewayBold',
   },
-  chipsWrap: { marginBottom: 14 },
-  chipsContent: { paddingHorizontal: 2 },
-  chip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#171E27',
-    borderRadius: 18,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#232C38',
-  },
-  chipIcon: {
-    height: 24,
-    width: 24,
-    borderRadius: 12,
-    marginRight: 10,
-    backgroundColor: '#121821',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  chipTitle: {
-    color: '#E8EDF7',
-    fontSize: 16,
-    fontFamily: 'RalewaySemiBold',
-  },
-  chipSubtitle: {
-    color: '#a0a0a0',
-    fontSize: 12,
-    marginTop: 2,
-    fontFamily: 'Raleway',
-  },
-  inputContainer: {
-    backgroundColor: '#1C222C',
-    borderRadius: 14,
-    paddingHorizontal: 10,
-    paddingTop: 4,
-    overflow: 'hidden',
-  },
-  inlineInput: {
-    flex: 1,
-    color: '#a0a0a0',
-    paddingHorizontal: 8,
-    paddingVertical: 10,
-    fontSize: 16,
-    maxHeight: 80,
-    fontFamily: 'Raleway',
-  },
-  textArea: {
-    flex: 1,
-    color: 'white',
-    fontSize: 16,
-    padding: 0,
-    maxHeight: 140,
-    fontFamily: 'Raleway',
-  },
-  iconsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingBottom: 8,
-  },
-  iconBtn: {
-    height: 40,
-    width: 40,
-    borderRadius: 10,
-    backgroundColor: '#1C222C',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  sendFilled: { backgroundColor: '#3E6FFF' },
+
+  // Modals
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
+    backgroundColor: 'rgba(0,0,0,0.6)',
     justifyContent: 'flex-end',
   },
   actionSheetContainer: {
-    backgroundColor: '#1A2028',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    padding: 20,
+    backgroundColor: '#161B23',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    padding: 24,
+    paddingBottom: 40,
   },
   actionSheetTitle: {
-    color: '#888',
+    color: '#9CA3AF',
     fontSize: 14,
-    marginBottom: 15,
+    marginBottom: 20,
     textAlign: 'center',
     fontFamily: 'Raleway',
   },
   actionSheetBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 15,
+    paddingVertical: 16,
   },
   actionSheetBtnText: {
     color: 'white',
     fontSize: 18,
-    marginLeft: 15,
+    marginLeft: 16,
     fontFamily: 'RalewaySemiBold',
   },
-  divider: { height: 1, backgroundColor: '#333' },
+  divider: { height: 1, backgroundColor: '#232C38' },
+
+  // Drawer
   drawerOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    flexDirection: 'row',
+    backgroundColor: 'rgba(0,0,0,0.3)',
   },
-  drawerContent: {
-    width: '80%',
-    backgroundColor: '#0E141C',
-    height: '100%',
+  drawerBlur: {
+    flex: 1,
+    // backgroundColor handled inline for theme
   },
   drawerHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: 20,
-    borderBottomWidth: 1,
-    borderBottomColor: '#333',
+    paddingHorizontal: 20,
+    paddingBottom: 20,
+    marginTop: 10,
   },
-  drawerTitle: {
-    color: 'white',
-    fontSize: 20,
-    fontWeight: 'bold',
-    fontFamily: 'RalewayBold',
+  historyPill: {
+    paddingHorizontal: 24,
+    paddingVertical: 10,
+    borderRadius: 30,
+    backgroundColor: '#161B23',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+  },
+  historyPillText: {
+    color: '#E8EDF7',
+    fontSize: 16,
+    fontFamily: 'Raleway',
+  },
+  historyList: {
+    paddingHorizontal: 24,
+    paddingTop: 10,
+  },
+  emptyHistoryText: {
+    color: '#6B7280',
+    textAlign: 'center',
+    marginTop: 40,
+    fontFamily: 'Raleway',
+    fontSize: 16,
   },
   historyItem: {
-    flexDirection: 'row',
-    paddingVertical: 15,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1C222C',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    paddingVertical: 12,
+    marginBottom: 12,
   },
   historyText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '500',
-    flex: 1,
-    fontFamily: 'RalewaySemiBold',
+    color: '#F9FAFB',
+    fontSize: 17,
+    fontFamily: 'RalewayBold',
+    marginBottom: 4,
   },
   historyDate: {
-    color: '#666',
-    fontSize: 12,
-    marginTop: 4,
+    color: '#9CA3AF',
+    fontSize: 13,
     fontFamily: 'Raleway',
+  },
+
+  // Profile Bar
+  profileBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 16, // Smaller padding for pill
+    marginHorizontal: 20,
+    marginBottom: 40,
+    borderRadius: 40, // Pill shape
+  },
+  profileAvatar: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    marginRight: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+  },
+  initialAvatar: {
+    backgroundColor: '#3E6FFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  profileName: {
+    color: '#fff',
+    fontSize: 18,
+    fontFamily: 'RalewaySemiBold',
+  },
+
+  // Context Menu
+  contextMenu: {
+    position: 'absolute',
+    borderRadius: 16,
+    paddingVertical: 4,
+  },
+  contextMenuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    gap: 12,
+  },
+  contextMenuText: {
+    fontSize: 16,
+    fontFamily: 'Raleway',
+  },
+  contextDivider: {
+    height: 1,
+    width: '100%',
   },
 });

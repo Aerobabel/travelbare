@@ -1,4 +1,4 @@
-import { FontAwesome5, Ionicons, MaterialIcons } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
 import * as Device from 'expo-device';
 import * as Linking from 'expo-linking'; // For Support/Email
 import * as Notifications from 'expo-notifications'; // For Push Config
@@ -12,13 +12,13 @@ import {
   Platform,
   Share,
   StyleSheet,
-  Switch,
   Text,
   TouchableOpacity,
   View
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import EditProfileModal from '../../components/EditProfileModal';
+import { useTheme } from '../../context/ThemeContext';
 import { supabase } from '../../lib/supabase';
 
 // Configure Notifications Handler
@@ -32,6 +32,7 @@ Notifications.setNotificationHandler({
 
 export default function Profile() {
   const router = useRouter();
+  const { colors, theme } = useTheme();
   const [signingOut, setSigningOut] = useState(false);
   const [user, setUser] = useState(null);
 
@@ -130,6 +131,10 @@ export default function Profile() {
         router.push('/payment-methods');
         break;
 
+      case 'Personalization':
+        router.push('/personalization');
+        break;
+
       case "My author's tours":
         router.push('/my-tours');
         break;
@@ -140,6 +145,10 @@ export default function Profile() {
 
       case 'Expense tracker':
         router.push('/expenses');
+        break;
+
+      case 'Data Storage':
+        router.push('/data-storage');
         break;
 
       case 'Travel Diary':
@@ -174,89 +183,86 @@ export default function Profile() {
   };
 
   const PROFILE_OPTIONS = [
-    { icon: 'person-outline', label: 'Personal information' },
-    { icon: 'description', label: 'My documents', iconPack: MaterialIcons },
-    { icon: 'credit-card', label: 'Payment methods', iconPack: MaterialIcons },
-    { icon: 'star-outline', label: 'Favorites' },
-    { icon: 'map', label: "My author's tours", iconPack: FontAwesome5 },
-    { icon: 'attach-money', label: 'Expense tracker', iconPack: MaterialIcons },
-    { icon: 'book-outline', label: 'Travel Diary' },
-    { icon: 'notifications-outline', label: 'Notifications', isSwitch: true },
-    { icon: 'settings-outline', label: 'Personalization' },
-    { icon: 'help-circle-outline', label: 'Support' },
+    { icon: 'person-circle-outline', label: 'Personal information' },
+    { icon: 'options-outline', label: 'Personalization' },
+    { icon: 'server-outline', label: 'Data Storage' },
     { icon: 'information-circle-outline', label: 'About' },
-    { icon: 'gift-outline', label: 'Refer a Friend' },
   ];
 
   const renderItem = ({ item }) => {
     const IconPack = item.iconPack || Ionicons;
     return (
       <TouchableOpacity
-        style={styles.optionButton}
+        style={[styles.optionButton, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}
         onPress={() => handleAction(item.label)}
       >
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-          <IconPack name={item.icon} size={20} color="#fff" style={styles.optionIcon} />
-          <Text style={styles.optionText}>{item.label}</Text>
+          <IconPack name={item.icon} size={22} color={colors.textSecondary} style={styles.optionIcon} />
+          <Text style={[styles.optionText, { color: colors.text }]}>{item.label}</Text>
         </View>
-
-        {item.isSwitch ? (
-          <Switch
-            value={notificationsEnabled}
-            onValueChange={toggleNotifications}
-            trackColor={{ false: "#767577", true: "#3E6FFF" }}
-            thumbColor={notificationsEnabled ? "#fff" : "#f4f3f4"}
-          />
-        ) : (
-          <Ionicons name="chevron-forward" size={16} color="#666" />
-        )}
+        <Ionicons name="chevron-forward" size={18} color={colors.textTertiary} />
       </TouchableOpacity>
     );
   };
 
   return (
-    <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
+    <SafeAreaView style={[styles.container, { backgroundColor: colors.background }]}>
       {/* Header */}
-      <View style={styles.profileCard}>
+      <View style={styles.header}>
+        <TouchableOpacity
+          style={[styles.circleBtn, { backgroundColor: colors.pillBackground, borderColor: colors.pillBorder }]}
+          onPress={() => router.back()}
+        >
+          <Ionicons name="arrow-back" size={24} color={colors.text} />
+        </TouchableOpacity>
+        <View style={[styles.headerPill, { backgroundColor: colors.pillBackground, borderColor: colors.pillBorder }]}>
+          <Text style={[styles.headerTitle, { color: colors.text }]}>Profile</Text>
+        </View>
+        <View style={styles.spacer} />
+      </View>
+
+      {/* Profile Card */}
+      <View style={[styles.profileCard, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}>
         {user?.user_metadata?.avatar_url ? (
           <Image source={{ uri: user.user_metadata.avatar_url }} style={styles.avatar} />
         ) : (
           <View style={[styles.avatar, styles.initialAvatar]}>
-            <Text style={{ color: '#0E141C', fontWeight: '800', fontSize: 24 }}>
-              {editName?.[0]?.toUpperCase() ?? 'T'}
+            <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 28 }}>
+              {(editName?.[0] || 'T').toUpperCase()}
             </Text>
           </View>
         )}
 
         <View style={styles.profileText}>
-          <Text style={styles.name}>{editName}</Text>
-          <Text style={styles.email}>{user?.email}</Text>
-          {!!editPhone && <Text style={styles.phone}>{editPhone}</Text>}
+          <Text style={[styles.name, { color: colors.text }]}>{editName || 'Guest'}</Text>
+          <Text style={[styles.email, { color: colors.textSecondary }]}>{user?.email || 'Not Signed In'}</Text>
+          <Text style={[styles.phone, { color: colors.textTertiary }]}>{editPhone || ''}</Text>
         </View>
-
-        <TouchableOpacity onPress={() => setEditModalVisible(true)}>
-          <Ionicons name="pencil-outline" size={20} color="#3E6FFF" />
-        </TouchableOpacity>
       </View>
 
       {/* Options List */}
-      <FlatList
-        data={PROFILE_OPTIONS}
-        keyExtractor={(_, index) => index.toString()}
-        renderItem={renderItem}
-        contentContainerStyle={styles.optionsContainer}
-        showsVerticalScrollIndicator={false}
-      />
+      <View style={{ flex: 1 }}>
+        <FlatList
+          data={PROFILE_OPTIONS}
+          keyExtractor={(_, index) => index.toString()}
+          renderItem={renderItem}
+          contentContainerStyle={styles.optionsContainer}
+          showsVerticalScrollIndicator={false}
+        />
+      </View>
 
       {/* Sign Out */}
       <TouchableOpacity
-        style={[styles.signOutButton, signingOut && { opacity: 0.7 }]}
+        style={[
+          styles.signOutButton,
+          { backgroundColor: theme === 'dark' ? '#131114' : '#FFF0F0', borderColor: 'rgba(255, 69, 58, 0.2)' }
+        ]}
         onPress={onSignOut}
         disabled={signingOut}
       >
-        {signingOut ? <ActivityIndicator color="#ff4d4d" /> : (
+        {signingOut ? <ActivityIndicator color="#FF453A" /> : (
           <>
-            <Ionicons name="log-out-outline" size={20} color="#ff4d4d" />
+            <Ionicons name="log-out-outline" size={20} color="#FF453A" style={{ marginRight: 10 }} />
             <Text style={styles.signOutText}>Sign Out</Text>
           </>
         )}
@@ -275,29 +281,111 @@ export default function Profile() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0E141C', paddingHorizontal: 20 },
-  profileCard: {
-    flexDirection: 'row', alignItems: 'center', marginTop: 20,
-    padding: 16, backgroundColor: '#1A1F2B', borderRadius: 12,
-  },
-  avatar: { width: 64, height: 64, borderRadius: 32, marginRight: 16 },
-  initialAvatar: { backgroundColor: '#E6EDF3', alignItems: 'center', justifyContent: 'center' },
-  profileText: { flex: 1 },
-  name: { fontSize: 18, fontWeight: 'bold', color: '#fff', fontFamily: 'Raleway_400Regular' },
-  email: { color: '#bbb', marginTop: 4, fontSize: 13 },
-  phone: { color: '#999', marginTop: 2, fontSize: 13 },
+  container: { flex: 1 },
 
-  optionsContainer: { paddingVertical: 20 },
+  // Header
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    marginTop: 10,
+    marginBottom: 20,
+  },
+  circleBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  headerPill: {
+    paddingHorizontal: 24,
+    paddingVertical: 10,
+    borderRadius: 30,
+    borderWidth: 1,
+  },
+  headerTitle: {
+    fontSize: 16,
+    fontFamily: 'Raleway_600SemiBold',
+  },
+  spacer: { width: 44 },
+
+  // Profile Card
+  profileCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: 20,
+    padding: 20,
+    borderRadius: 24,
+    borderWidth: 1,
+  },
+  avatar: {
+    width: 80,
+    height: 80,
+    borderRadius: 20, // Rounded square
+    marginRight: 20,
+  },
+  initialAvatar: {
+    backgroundColor: '#3E6FFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  profileText: { flex: 1, justifyContent: 'center' },
+  name: {
+    fontSize: 18,
+    fontFamily: 'Raleway_700Bold',
+    marginBottom: 4,
+  },
+  email: {
+    fontSize: 14,
+    fontFamily: 'Raleway_400Regular',
+    marginBottom: 2,
+  },
+  phone: {
+    fontSize: 13,
+    fontFamily: 'Raleway_400Regular',
+  },
+
+  // Options
+  optionsContainer: {
+    paddingHorizontal: 20,
+    paddingTop: 30,
+    gap: 12,
+  },
   optionButton: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    padding: 16, backgroundColor: '#1A1F2B', borderRadius: 10, marginBottom: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 18,
+    paddingHorizontal: 20,
+    borderRadius: 30, // Pill shape
+    borderWidth: 1,
+    marginBottom: 4,
   },
   optionIcon: { marginRight: 16 },
-  optionText: { fontSize: 15, color: '#fff', fontFamily: 'Raleway_400Regular' },
-
-  signOutButton: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    padding: 14, backgroundColor: '#1A1F2B', borderRadius: 10, marginBottom: 70, gap: 8,
+  optionText: {
+    fontSize: 16,
+    fontFamily: 'Raleway_400Regular',
   },
-  signOutText: { fontSize: 16, color: '#ff4d4d', fontWeight: '600', fontFamily: 'Raleway_400Regular' },
+
+  // Sign Out
+  signOutButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-start',
+    paddingVertical: 18,
+    paddingHorizontal: 20,
+    borderRadius: 30,
+    borderWidth: 1,
+    marginHorizontal: 20,
+    marginBottom: 40, // Bottom margin
+  },
+  signOutText: {
+    fontSize: 16,
+    color: '#FF453A',
+    fontWeight: '600',
+    fontFamily: 'Raleway_600SemiBold',
+  },
 });
