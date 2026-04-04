@@ -27,7 +27,10 @@ export default function RootLayout() {
   useEffect(() => {
     async function loadAssets() {
       try {
-        const images = [require('../assets/images/LoadingScreen.png')];
+        const images = [
+          require('../assets/images/LoadingScreen.png'),
+          require('../assets/images/glass.png')
+        ];
         const cacheImages = images.map(image => Asset.fromModule(image).downloadAsync());
         await Promise.all(cacheImages);
       } catch (e) {

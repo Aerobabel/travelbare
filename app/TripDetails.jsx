@@ -44,9 +44,9 @@ const ICON_MAP = {
 const getSafeWeatherIcon = (rawIcon) => {
   if (!rawIcon) return "partly-sunny-outline";
   const str = String(rawIcon).toLowerCase();
-  
+
   // Pass through if valid outline
-  if (str.includes( 'sunny-outline') || str.includes('rainy-outline') || str.includes('cloudy-outline') || str.includes('partly-sunny-outline')) return str;
+  if (str.includes('sunny-outline') || str.includes('rainy-outline') || str.includes('cloudy-outline') || str.includes('partly-sunny-outline')) return str;
 
   // Map known keywords
   if (str.includes("sun") && !str.includes('partly')) return "sunny-outline";
@@ -229,8 +229,9 @@ const WhatIncludedView = ({ plan, formatPrice, onPurchase }) => {
       {plan.costBreakdown.map((item, index) => {
         const isFlight = item.item.toLowerCase().includes('flight') || item.item.toLowerCase().includes('fly tickets');
         const isHotel = item.item.toLowerCase().includes('hotel') || item.item.toLowerCase().includes('stay') || item.item.toLowerCase().includes('accommodation');
-        const isActionable = isFlight || isHotel;
-        
+        // Disable hotel action as requested
+        const isActionable = isFlight; // || isHotel;
+
         // Use real raw data if available
         const flightData = (isFlight && item.raw) ? item.raw : null;
         const hasRichFlightData = !!flightData;
@@ -254,15 +255,15 @@ const WhatIncludedView = ({ plan, formatPrice, onPurchase }) => {
                 <Text style={[styles.includedDateDay, { color: colors.text }]}>{item.iconValue.split(' ')[1]}</Text>
               </View>
             ) : item.iconType === 'icon' ? (
-               <View style={[styles.includedIconDate, { backgroundColor: theme === 'dark' ? '#101620' : '#F3F4F6', }]}>
-                  <Ionicons name={item.iconValue || 'ellipse'} size={24} color={colors.text} />
-               </View>
+              <View style={[styles.includedIconDate, { backgroundColor: theme === 'dark' ? '#101620' : '#F3F4F6', }]}>
+                <Ionicons name={item.iconValue || 'ellipse'} size={24} color={colors.text} />
+              </View>
             ) : (
               <View style={[styles.includedIconImageWrapper, { backgroundColor: theme === 'dark' ? 'transparent' : '#F3F4F6', borderRadius: 12 }]}>
                 <Image source={{ uri: item.iconValue }} style={styles.includedIconImage} />
               </View>
             )}
-            
+
             <View style={styles.includedDetails}>
               {hasRichFlightData ? (
                 <>
@@ -272,28 +273,28 @@ const WhatIncludedView = ({ plan, formatPrice, onPurchase }) => {
                       {flightData.airline ? flightData.airline.split(/[\/\?,(]/)[0].trim() : ''}
                     </Text>
                   </View>
-                  
+
                   {/* Row 1: Times and Duration */}
                   <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', marginTop: 4, gap: 12, paddingRight: 12 }}>
-                     <Text style={{ fontSize: 13, fontFamily: 'Raleway-Bold', color: colors.text }}>
-                        {formatTime(flightData.depart || flightData.departTime)} - {formatTime(flightData.arrive || flightData.arriveTime)}
-                     </Text>
-                     <Text style={{ fontSize: 12, fontFamily: 'Raleway-Regular', color: colors.textSecondary }}>
-                        {item.details}
-                     </Text>
+                    <Text style={{ fontSize: 13, fontFamily: 'Raleway-Bold', color: colors.text }}>
+                      {formatTime(flightData.depart || flightData.departTime)} - {formatTime(flightData.arrive || flightData.arriveTime)}
+                    </Text>
+                    <Text style={{ fontSize: 12, fontFamily: 'Raleway-Regular', color: colors.textSecondary }}>
+                      {item.details}
+                    </Text>
                   </View>
 
                   {/* Row 2: Route and Layover/Extra Info */}
                   <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', marginTop: 2, gap: 12, paddingRight: 12 }}>
-                      <Text style={{ fontSize: 12, fontFamily: 'Raleway-SemiBold', color: colors.textTertiary }}>
-                          {flightData.origin}   {flightData.destination}
+                    <Text style={{ fontSize: 12, fontFamily: 'Raleway-SemiBold', color: colors.textTertiary }}>
+                      {flightData.origin}   {flightData.destination}
+                    </Text>
+                    {/* Check specifically for layover field */}
+                    {flightData.layover && (
+                      <Text style={{ fontSize: 12, fontFamily: 'Raleway-Regular', color: colors.textTertiary, flex: 1 }}>
+                        {flightData.layover}
                       </Text>
-                      {/* Check specifically for layover field */}
-                      {flightData.layover && (
-                          <Text style={{ fontSize: 12, fontFamily: 'Raleway-Regular', color: colors.textTertiary, flex: 1 }}>
-                              {flightData.layover}
-                          </Text>
-                      )}
+                    )}
                   </View>
                 </>
               ) : (
@@ -303,7 +304,7 @@ const WhatIncludedView = ({ plan, formatPrice, onPurchase }) => {
                   <Text style={[styles.includedItemDetails, { color: colors.textTertiary }]}>{item.details}</Text>
                 </>
               )}
-              
+
               {isActionable && !hasRichFlightData && (
                 <Text style={styles.actionLinkText}>
                   {isFlight ? 'Search Flights →' : 'Check Availability →'}
@@ -357,14 +358,15 @@ export default function TripDetailsScreen() {
         }
       });
     } else if (title.includes('hotel') || title.includes('stay') || title.includes('accommodation')) {
-      router.push({
-        pathname: '/HotelSearchFlow',
-        params: {
-          destination: destination,
-          checkIn: checkIn,
-          checkOut: checkOut
-        }
-      });
+      // Hotel search disabled as requested
+      // router.push({
+      //   pathname: '/HotelSearchFlow',
+      //   params: {
+      //     destination: destination,
+      //     checkIn: checkIn,
+      //     checkOut: checkOut
+      //   }
+      // });
     }
   };
 

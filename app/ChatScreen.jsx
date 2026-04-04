@@ -65,6 +65,7 @@ export default function ChatScreen() {
 
   const [messages, setMessages] = useState(() => cachedMessages ?? [WELCOME_MESSAGE]);
   const [input, setInput] = useState('');
+  const [isTyping, setIsTyping] = useState(false);
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [showGuestPicker, setShowGuestPicker] = useState(false);
   const [showPaymentSheet, setShowPaymentSheet] = useState(false);
@@ -193,34 +194,40 @@ export default function ChatScreen() {
 
   /** send normal user text */
   const sendUser = async (text) => {
-    const trimmed = (text || '').trim();
+    const trimmed = (text || ‘’).trim();
     if (!trimmed) return;
 
-    setMessages((prev) => [...prev, { role: 'user', text: trimmed }]);
-    setInput('');
+    setMessages((prev) => [...prev, { role: ‘user’, text: trimmed }]);
+    setInput(‘’);
+    setIsTyping(true);
 
     try {
-      const history = historyForServer(messages, { role: 'user', text: trimmed });
+      const history = historyForServer(messages, { role: ‘user’, text: trimmed });
       const { aiText, signal } = await callTravelBot(history);
+      setIsTyping(false);
       if (signal) handleSignal(signal, aiText);
-      else if (aiText) setMessages((prev) => [...prev, { role: 'ai', text: aiText }]);
+      else if (aiText) setMessages((prev) => [...prev, { role: ‘ai’, text: aiText }]);
     } catch {
-      setMessages((prev) => [...prev, { role: 'ai', text: 'I couldn’t reach the server. Try again?' }]);
+      setIsTyping(false);
+      setMessages((prev) => [...prev, { role: ‘ai’, text: ‘I couldn’t reach the server. Try again?’ }]);
     }
   };
 
   /** date picker callback */
   const onDatesSelected = async ({ startDate, endDate }) => {
     setShowDatePicker(false);
-    const fact = `📅 I'd like to go from ${startDate} to ${endDate}`;
+    const fact = `I'd like to go from ${startDate} to ${endDate}`;
     setMessages((prev) => [...prev, { role: 'user', text: fact }]);
+    setIsTyping(true);
 
     try {
       const history = historyForServer(messages, { role: 'user', text: fact });
       const { aiText, signal } = await callTravelBot(history);
+      setIsTyping(false);
       if (signal) handleSignal(signal, aiText);
       else if (aiText) setMessages((prev) => [...prev, { role: 'ai', text: aiText }]);
     } catch {
+      setIsTyping(false);
       setMessages((prev) => [...prev, { role: 'ai', text: "Couldn't save your dates — try again?" }]);
     }
   };
@@ -228,15 +235,18 @@ export default function ChatScreen() {
   /** guest picker callback */
   const onGuestSelected = async ({ adults, children }) => {
     setShowGuestPicker(false);
-    const fact = `👤 We're ${adults} adult(s) and ${children} child(ren).`;
+    const fact = `We're ${adults} adult(s) and ${children} child(ren).`;
     setMessages((prev) => [...prev, { role: 'user', text: fact }]);
+    setIsTyping(true);
 
     try {
       const history = historyForServer(messages, { role: 'user', text: fact });
       const { aiText, signal } = await callTravelBot(history);
+      setIsTyping(false);
       if (signal) handleSignal(signal, aiText);
       else if (aiText) setMessages((prev) => [...prev, { role: 'ai', text: aiText }]);
     } catch {
+      setIsTyping(false);
       setMessages((prev) => [...prev, { role: 'ai', text: "Couldn't save your guests — try again?" }]);
     }
   };
@@ -302,22 +312,33 @@ export default function ChatScreen() {
     );
   };
 
+  /** Clean any leftover markdown from AI text and render with lightweight bold support. */
   const StyledText = ({ style, children }) => {
-    // Basic parser for **bold**
     if (!children) return null;
-    const parts = children.split(/(\*\*.*?\*\*)/g);
+    // Strip markdown artifacts the server didn't catch
+    let cleaned = children
+      .replace(/\*\*\*(.*?)\*\*\*/g, '$1')
+      .replace(/^#{1,4}\s+/gm, '')
+      .replace(/^[-]\s+/gm, '• ')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/---+/g, '');
+
+    // Split on **bold** so we can render bold spans
+    const parts = cleaned.split(/(\*\*.*?\*\*)/g);
 
     return (
       <Text style={style}>
         {parts.map((part, index) => {
           if (part.startsWith('**') && part.endsWith('**')) {
             return (
-              <Text key={index} style={{ fontWeight: 'bold' }}>
+              <Text key={index} style={{ fontWeight: '700' }}>
                 {part.slice(2, -2)}
               </Text>
             );
           }
-          return <Text key={index}>{part}</Text>;
+          // Strip any remaining single asterisks
+          const plain = part.replace(/\*(.*?)\*/g, '$1');
+          return <Text key={index}>{plain}</Text>;
         })}
       </Text>
     );
@@ -340,7 +361,16 @@ export default function ChatScreen() {
           keyExtractor={(_, i) => i.toString()}
           renderItem={renderMessage}
           contentContainerStyle={{ padding: 16 }}
-          ListFooterComponent={<View style={{ height: 12 }} />}
+          ListFooterComponent={
+            <>
+              {isTyping && (
+                <View style={[styles.messageBubble, styles.aiBubble, { paddingVertical: 12, paddingHorizontal: 16 }]}>
+                  <Text style={{ color: '#9ca3af', fontSize: 14, letterSpacing: 2 }}>typing...</Text>
+                </View>
+              )}
+              <View style={{ height: 12 }} />
+            </>
+          }
           keyboardShouldPersistTaps="handled"
         />
 

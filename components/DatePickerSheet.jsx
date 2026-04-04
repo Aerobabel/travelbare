@@ -26,6 +26,8 @@ const toKey = (d) => {
   return `${year}-${month}-${day}`;
 };
 
+const TODAY_KEY = toKey(new Date());
+
 const generateMonths = () => {
   const list = [];
   const now = new Date();
@@ -59,6 +61,7 @@ const generateMonths = () => {
   return list;
 };
 
+
 // --- DayCell ---
 const DayCell = React.memo(({ d, startDate, endDate, onDayPress }) => {
   const { colors, theme } = useTheme();
@@ -83,6 +86,8 @@ const DayCell = React.memo(({ d, startDate, endDate, onDayPress }) => {
       width: COL
     });
     dayTextStyle.push({ color: colors.text });
+  } else if (key === TODAY_KEY) {
+    dayTextStyle.push({ color: colors.danger, fontWeight: '700' });
   }
 
   return (

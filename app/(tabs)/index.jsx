@@ -6,6 +6,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import { BlurView } from 'expo-blur';
 import * as ImagePicker from 'expo-image-picker';
+import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import React, {
   useCallback,
@@ -37,6 +38,10 @@ import {
 import {
   useSafeAreaInsets,
 } from 'react-native-safe-area-context';
+import { GlassReflection } from '../../components/ui/GlassReflection';
+import { LiquidTexture } from '../../components/ui/LiquidTexture';
+import { NoiseTexture } from '../../components/ui/NoiseTexture';
+import { getGlassStyle, getGlassTextStyle } from '../../constants/GlassStyles';
 import { useTheme } from '../../context/ThemeContext';
 import { supabase } from '../../lib/supabase';
 
@@ -46,6 +51,10 @@ import GuestPicker from '../../components/GuestPicker';
 
 // --- Constants & Helpers ---
 
+// Brighter deep blue gradient for better glass contrast
+// Solid dark flat background
+const BACKGROUND_GRADIENT = ['#0E141C', '#0E141C', '#0E141C'];
+
 const WELCOME_MESSAGE = {
   id: 'welcome-0',
   role: 'ai',
@@ -53,6 +62,7 @@ const WELCOME_MESSAGE = {
 };
 
 const SESSION_STORAGE_KEY = 'travel_chat_sessions';
+const CHAT_SESSIONS_TABLE = 'chat_sessions';
 
 let globalMessageIdCounter = 0;
 const generateUniqueId = (prefix = 'msg') => {
@@ -86,7 +96,89 @@ const getWeatherIconName = (rawIcon) => {
 };
 
 // --- Storage Logic ---
-async function saveSessionToStorage(messages, currentSessionId) {
+const safeParseSessions = (raw) => {
+  try {
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+};
+
+const sortedSessions = (sessionsMap) =>
+  Object.values(sessionsMap).sort((a, b) => b.timestamp - a.timestamp);
+
+const toCloudSessionRow = (session, userId) => ({
+  user_id: userId,
+  session_id: session.id,
+  preview: session.preview,
+  timestamp: session.timestamp,
+  messages: session.messages,
+  custom_title: !!session.customTitle,
+  updated_at: new Date(session.timestamp).toISOString(),
+});
+
+const toLocalSessionEntry = (row) => ({
+  id: row.session_id,
+  preview: row.preview || 'New Trip...',
+  timestamp:
+    typeof row.timestamp === 'number'
+      ? row.timestamp
+      : Date.parse(row.updated_at || '') || Date.now(),
+  messages: Array.isArray(row.messages) ? row.messages : [],
+  customTitle: !!row.custom_title,
+});
+
+async function upsertSessionsToCloud(sessions, userId) {
+  if (!userId || !sessions.length) return;
+  const payload = sessions.map((session) => toCloudSessionRow(session, userId));
+  const { error } = await supabase
+    .from(CHAT_SESSIONS_TABLE)
+    .upsert(payload, { onConflict: 'user_id,session_id' });
+  if (error) {
+    console.error('Failed to sync chat sessions to cloud', error);
+  }
+}
+
+async function getCurrentUserId() {
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  return user?.id || null;
+}
+
+async function loadSessionsFromStorageAndCloud(userId = null) {
+  const stored = await AsyncStorage.getItem(SESSION_STORAGE_KEY);
+  const localSessionsMap = safeParseSessions(stored);
+
+  if (!userId) {
+    return sortedSessions(localSessionsMap);
+  }
+
+  // Push local cache first so sessions created on this device are not lost.
+  await upsertSessionsToCloud(Object.values(localSessionsMap), userId);
+
+  const { data, error } = await supabase
+    .from(CHAT_SESSIONS_TABLE)
+    .select('session_id, preview, timestamp, messages, custom_title, updated_at')
+    .eq('user_id', userId)
+    .order('timestamp', { ascending: false });
+
+  if (error) {
+    console.error('Failed to load cloud sessions', error);
+    return sortedSessions(localSessionsMap);
+  }
+
+  const merged = { ...localSessionsMap };
+  (data || []).forEach((row) => {
+    const localSession = toLocalSessionEntry(row);
+    merged[localSession.id] = localSession;
+  });
+
+  await AsyncStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(merged));
+  return sortedSessions(merged);
+}
+
+async function saveSessionToStorage(messages, currentSessionId, explicitUserId = null) {
   if (messages.length <= 2 || !currentSessionId) return;
   try {
     const firstUserMsg = messages.find((m) => m.role === 'user');
@@ -99,26 +191,75 @@ async function saveSessionToStorage(messages, currentSessionId) {
     }
 
     const stored = await AsyncStorage.getItem(SESSION_STORAGE_KEY);
-    let sessions = stored ? JSON.parse(stored) : {};
+    let sessions = safeParseSessions(stored);
 
-    if (sessions[currentSessionId]) {
-      // Preserve custom title if set
-      if (sessions[currentSessionId].customTitle) {
-        preview = sessions[currentSessionId].preview;
-      }
+    if (sessions[currentSessionId]?.customTitle) {
+      preview = sessions[currentSessionId].preview;
     }
 
-    sessions[currentSessionId] = {
+    const nextSession = {
       id: currentSessionId,
-      preview: preview.substring(0, 30) + (sessions[currentSessionId]?.customTitle ? '' : '...'),
+      preview:
+        preview.substring(0, 30) + (sessions[currentSessionId]?.customTitle ? '' : '...'),
       timestamp: sessions[currentSessionId]?.timestamp || Date.now(),
       messages,
       customTitle: sessions[currentSessionId]?.customTitle || false,
     };
 
+    sessions[currentSessionId] = nextSession;
     await AsyncStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sessions));
+
+    const userId = explicitUserId || (await getCurrentUserId());
+    await upsertSessionsToCloud([nextSession], userId);
   } catch (e) {
     console.error('Failed to save session', e);
+  }
+}
+
+async function deleteSessionFromStorage(sessionId, explicitUserId = null) {
+  const stored = await AsyncStorage.getItem(SESSION_STORAGE_KEY);
+  const sessions = safeParseSessions(stored);
+  delete sessions[sessionId];
+  await AsyncStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sessions));
+
+  const userId = explicitUserId || (await getCurrentUserId());
+  if (!userId) return;
+
+  const { error } = await supabase
+    .from(CHAT_SESSIONS_TABLE)
+    .delete()
+    .eq('user_id', userId)
+    .eq('session_id', sessionId);
+  if (error) {
+    console.error('Failed to delete cloud session', error);
+  }
+}
+
+async function renameSessionInStorage(sessionId, newName, explicitUserId = null) {
+  const stored = await AsyncStorage.getItem(SESSION_STORAGE_KEY);
+  const sessions = safeParseSessions(stored);
+  if (!sessions[sessionId]) return;
+
+  sessions[sessionId].preview = newName;
+  sessions[sessionId].customTitle = true;
+  sessions[sessionId].timestamp = Date.now();
+  await AsyncStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sessions));
+
+  const userId = explicitUserId || (await getCurrentUserId());
+  if (!userId) return;
+
+  const { error } = await supabase
+    .from(CHAT_SESSIONS_TABLE)
+    .update({
+      preview: newName,
+      custom_title: true,
+      timestamp: sessions[sessionId].timestamp,
+      updated_at: new Date(sessions[sessionId].timestamp).toISOString(),
+    })
+    .eq('user_id', userId)
+    .eq('session_id', sessionId);
+  if (error) {
+    console.error('Failed to rename cloud session', error);
   }
 }
 
@@ -235,6 +376,9 @@ const HistoryDrawer = ({
   currentSessionId,
 }) => {
   const { colors, theme } = useTheme();
+  const insets = useSafeAreaInsets();
+  const glassStyle = getGlassStyle(theme);
+  const glassTextStyle = getGlassTextStyle(theme);
   const [sessions, setSessions] = useState([]);
   const [user, setUser] = useState(null);
   const router = useRouter();
@@ -263,21 +407,13 @@ const HistoryDrawer = ({
           {
             text: 'Save',
             onPress: async (newName) => {
-              if (newName?.trim()) {
-                const stored = await AsyncStorage.getItem(SESSION_STORAGE_KEY);
-                const allSessions = stored ? JSON.parse(stored) : {};
-                if (allSessions[selectedItem.id]) {
-                  allSessions[selectedItem.id].preview = newName.trim();
-                  allSessions[selectedItem.id].customTitle = true; // Flag to prevent overwrite
-                  // Update current header if it's the active chat
-                  if (selectedItem.id === currentSessionId) {
-                    onSetChatTitle(newName.trim());
-                  }
-
-                  await AsyncStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(allSessions));
-                  // Refresh specific item in state
-                  setSessions(prev => prev.map(s => s.id === selectedItem.id ? { ...s, preview: newName.trim(), customTitle: true } : s));
-                }
+              if (!newName?.trim() || !selectedItem?.id) return;
+              await renameSessionInStorage(selectedItem.id, newName.trim(), user?.id || null);
+              const refreshed = await loadSessionsFromStorageAndCloud(user?.id || null);
+              setSessions(refreshed);
+              // Update current header if it's the active chat
+              if (selectedItem.id === currentSessionId) {
+                onSetChatTitle(newName.trim());
               }
             }
           }
@@ -311,24 +447,21 @@ const HistoryDrawer = ({
 
 
   useEffect(() => {
+    let isMounted = true;
     if (visible) {
-      // Load Sessions
-      AsyncStorage.getItem(SESSION_STORAGE_KEY).then((res) => {
-        if (res) {
-          const parsed = JSON.parse(res);
-          const sorted = Object.values(parsed).sort(
-            (a, b) => b.timestamp - a.timestamp
-          );
-          setSessions(sorted);
-        } else {
-          setSessions([]);
-        }
-      });
-      // Load User
-      supabase.auth.getUser().then(({ data: { user } }) => {
-        if (user) setUser(user);
-      });
+      (async () => {
+        const {
+          data: { user: authUser },
+        } = await supabase.auth.getUser();
+        if (!isMounted) return;
+        setUser(authUser || null);
+        const loaded = await loadSessionsFromStorageAndCloud(authUser?.id || null);
+        if (isMounted) setSessions(loaded);
+      })();
     }
+    return () => {
+      isMounted = false;
+    };
   }, [visible]);
 
   if (!visible) return null;
@@ -342,33 +475,91 @@ const HistoryDrawer = ({
       transparent
     >
       <View style={styles.drawerOverlay}>
-        <BlurView intensity={90} tint={theme === 'dark' ? "dark" : "light"} style={[styles.drawerBlur, { backgroundColor: theme === 'light' ? 'rgba(255,255,255,0.9)' : 'rgba(14, 20, 28, 0.95)' }]}>
-          <View style={[styles.drawerHeader, { paddingTop: topInset || 10, borderBottomColor: colors.divider }]}>
-            <TouchableOpacity
-              onPress={onClose}
-              style={[styles.circleBtn, { backgroundColor: colors.pillBackground, borderColor: colors.pillBorder }]}
+        <BlurView
+          intensity={glassStyle.shadowOpacity * 100 + 70}
+          tint={theme === 'dark' ? "dark" : "light"}
+          style={[styles.drawerBlur, { backgroundColor: glassStyle.backgroundColor.replace('0.03', '0.01') }]}
+        >
+          <LiquidTexture opacity={0.1} scale={2} />
+          <GlassReflection opacity={0.05} />
+          <View style={[styles.drawerHeader, { paddingTop: topInset || 10, borderBottomWidth: 0 }]}>
+            <BlurView
+              intensity={20}
+              tint={theme === 'dark' ? "dark" : "light"}
+              style={[
+                styles.circleBtn,
+                {
+                  backgroundColor: theme === 'dark' ? 'rgba(22, 27, 35, 0.15)' : 'rgba(255, 255, 255, 0.15)',
+                  borderColor: glassStyle.borderColor,
+                  borderWidth: glassStyle.borderWidth,
+                  overflow: 'hidden'
+                }
+              ]}
             >
-              <Ionicons name="close" size={24} color={colors.text} />
-            </TouchableOpacity>
+              <LiquidTexture opacity={0.1} />
+              <NoiseTexture opacity={0.2} />
+              <TouchableOpacity
+                onPress={onClose}
+                style={{ flex: 1, alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%' }}
+              >
+                <Ionicons name="close" size={24} color={colors.text} />
+              </TouchableOpacity>
+            </BlurView>
 
-            <View style={[styles.historyPill, { backgroundColor: colors.pillBackground, borderColor: colors.pillBorder }]}>
-              <Text style={[styles.historyPillText, { color: colors.text }]}>Chats History</Text>
-            </View>
-
-            <TouchableOpacity
-              onPress={() => {
-                onClose();
-              }}
-              style={[styles.circleBtn, { backgroundColor: colors.pillBackground, borderColor: colors.pillBorder }]}
+            <BlurView
+              intensity={20}
+              tint={theme === 'dark' ? "dark" : "light"}
+              style={[
+                styles.historyPill,
+                {
+                  backgroundColor: theme === 'dark' ? 'rgba(22, 27, 35, 0.15)' : 'rgba(255, 255, 255, 0.15)',
+                  borderColor: glassStyle.borderColor,
+                  borderWidth: glassStyle.borderWidth,
+                  overflow: 'hidden'
+                }
+              ]}
             >
-              <Ionicons name="create-outline" size={24} color={colors.text} />
-            </TouchableOpacity>
+              <LiquidTexture opacity={0.1} />
+              <NoiseTexture opacity={0.2} />
+              <GlassReflection />
+              <View style={{ paddingHorizontal: 24, paddingVertical: 10 }}>
+                <Text style={[styles.historyPillText, { color: colors.text }, glassTextStyle]}>Chats History</Text>
+              </View>
+            </BlurView>
+
+            <BlurView
+              intensity={20}
+              tint={theme === 'dark' ? "dark" : "light"}
+              style={[
+                styles.circleBtn,
+                {
+                  backgroundColor: theme === 'dark' ? 'rgba(22, 27, 35, 0.15)' : 'rgba(255, 255, 255, 0.15)',
+                  borderColor: glassStyle.borderColor,
+                  borderWidth: glassStyle.borderWidth,
+                  overflow: 'hidden'
+                }
+              ]}
+            >
+              <LiquidTexture opacity={0.1} />
+              <NoiseTexture opacity={0.2} />
+              <TouchableOpacity
+                onPress={() => {
+                  onClose();
+                }}
+                style={{ flex: 1, alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%' }}
+              >
+                <Ionicons name="create-outline" size={24} color={colors.text} />
+              </TouchableOpacity>
+            </BlurView>
           </View>
 
           <FlatList
             data={sessions}
             keyExtractor={(item) => item.id}
-            contentContainerStyle={styles.historyList}
+            contentContainerStyle={[styles.historyList, {
+              paddingTop: (topInset || 10) + 80, // Header height + padding
+              paddingBottom: 120, // Profile bar height + padding
+            }]}
             ListEmptyComponent={
               <Text style={[styles.emptyHistoryText, { color: colors.textTertiary }]}>No history yet.</Text>
             }
@@ -386,10 +577,10 @@ const HistoryDrawer = ({
                 onLongPress={(e) => handleLongPress(e, item)}
                 delayLongPress={300}
               >
-                <Text style={[styles.historyText, { color: colors.text }]} numberOfLines={1}>
+                <Text style={[styles.historyText, { color: colors.text }, glassTextStyle]} numberOfLines={1}>
                   {item.preview}
                 </Text>
-                <Text style={[styles.historyDate, { color: colors.textTertiary }]}>
+                <Text style={[styles.historyDate, { color: colors.textTertiary }, glassTextStyle]}>
                   {new Date(item.timestamp).toLocaleDateString()}
                 </Text>
               </TouchableOpacity>
@@ -400,53 +591,59 @@ const HistoryDrawer = ({
           {menuVisible && (
             <View style={StyleSheet.absoluteFill}>
               <Pressable style={{ flex: 1 }} onPress={() => setMenuVisible(false)} />
-              <View style={[
-                styles.contextMenu,
-                { top: menuPosition.y, left: 60, right: 60 },
-                theme === 'light' ? {
-                  backgroundColor: '#FFFFFF',
-                  shadowColor: "#000",
-                  shadowOffset: { width: 0, height: 4 },
-                  shadowOpacity: 0.2,
-                  shadowRadius: 10,
-                  elevation: 10
-                } : {
-                  backgroundColor: '#1F2937',
-                  borderWidth: 1,
-                  borderColor: 'rgba(255,255,255,0.1)'
-                }
-              ]}>
+              <BlurView
+                intensity={80}
+                tint={theme === 'dark' ? 'dark' : 'light'}
+                style={[
+                  styles.contextMenu,
+                  { top: menuPosition.y, left: 60, right: 60, overflow: 'hidden' },
+                  {
+                    borderColor: glassStyle.borderColor,
+                    borderWidth: glassStyle.borderWidth,
+                    backgroundColor: glassStyle.backgroundColor
+                  }
+                ]}
+              >
+                <LiquidTexture opacity={0.1} />
                 <TouchableOpacity style={styles.contextMenuItem} onPress={() => { setMenuVisible(false); /* Share Logic */ }}>
                   <Ionicons name="share-outline" size={20} color={colors.text} />
-                  <Text style={[styles.contextMenuText, { color: colors.text }]}>Share</Text>
+                  <Text style={[styles.contextMenuText, { color: colors.text }, glassTextStyle]}>Share</Text>
                 </TouchableOpacity>
                 <View style={[styles.contextDivider, { backgroundColor: colors.divider }]} />
                 <TouchableOpacity style={styles.contextMenuItem} onPress={handleRename}>
                   <Ionicons name="pencil-outline" size={20} color={colors.text} />
-                  <Text style={[styles.contextMenuText, { color: colors.text }]}>Rename</Text>
+                  <Text style={[styles.contextMenuText, { color: colors.text }, glassTextStyle]}>Rename</Text>
                 </TouchableOpacity>
                 <View style={[styles.contextDivider, { backgroundColor: colors.divider }]} />
                 <TouchableOpacity style={styles.contextMenuItem} onPress={handleDelete}>
                   <Ionicons name="trash-outline" size={20} color="#EF4444" />
-                  <Text style={[styles.contextMenuText, { color: "#EF4444" }]}>Delete</Text>
+                  <Text style={[styles.contextMenuText, { color: "#EF4444" }, glassTextStyle]}>Delete</Text>
                 </TouchableOpacity>
-              </View>
+              </BlurView>
             </View>
           )}
 
           {/* Profile Bar */}
-          <View style={[
-            styles.profileBar,
-            {
-              backgroundColor: colors.card,
-              borderTopColor: 'transparent',
-              shadowColor: "#000",
-              shadowOffset: { width: 0, height: 2 },
-              shadowOpacity: 0.1,
-              shadowRadius: 8,
-              elevation: 5
-            }
-          ]}>
+          <BlurView
+            intensity={25}
+            tint={theme === 'dark' ? "dark" : "light"}
+            style={[
+              styles.profileBar,
+              {
+                backgroundColor: theme === 'dark' ? 'rgba(22, 27, 35, 0.15)' : 'rgba(255, 255, 255, 0.15)',
+                borderColor: glassStyle.borderColor,
+                borderWidth: glassStyle.borderWidth,
+                overflow: 'hidden',
+                bottom: insets.bottom + 20, // Floating above home indicator
+                left: 20,
+                right: 20,
+                borderRadius: 40, // Pill shape
+              }
+            ]}
+          >
+            <LiquidTexture opacity={0.1} />
+            <NoiseTexture opacity={0.15} />
+            <GlassReflection />
             {user?.user_metadata?.avatar_url ? (
               <Image
                 source={{ uri: user.user_metadata.avatar_url }}
@@ -460,7 +657,7 @@ const HistoryDrawer = ({
               </View>
             )}
             <View style={{ flex: 1 }}>
-              <Text style={[styles.profileName, { color: colors.text }]}>
+              <Text style={[styles.profileName, { color: colors.text }, glassTextStyle]}>
                 {user?.user_metadata?.full_name || user?.email?.split('@')[0] || 'Traveler'}
               </Text>
             </View>
@@ -470,7 +667,7 @@ const HistoryDrawer = ({
             }}>
               <Ionicons name="settings-outline" size={24} color={colors.textSecondary} />
             </TouchableOpacity>
-          </View>
+          </BlurView>
         </BlurView>
       </View>
     </Modal>
@@ -530,6 +727,9 @@ const FEATURE_CHIPS = [
 
 const FeatureChipsBar = React.memo(({ onSelectChip }) => {
   const { colors, theme } = useTheme();
+  const glassStyle = getGlassStyle(theme);
+  const glassTextStyle = getGlassTextStyle(theme);
+
   return (
     <View style={styles.chipsWrap}>
       <FlatList
@@ -540,32 +740,33 @@ const FeatureChipsBar = React.memo(({ onSelectChip }) => {
         contentContainerStyle={styles.chipsContent}
         ItemSeparatorComponent={() => <View style={{ width: 12 }} />}
         renderItem={({ item }) => (
-          <BlurView intensity={20} tint={theme === 'dark' ? "dark" : "light"} style={[styles.chipBlur, { borderRadius: 32, overflow: 'hidden' }]}>
+          <BlurView
+            intensity={glassStyle.shadowOpacity * 100 + 40} // Dynamic intensity based on theme
+            tint={theme === 'dark' ? "dark" : "light"}
+            style={[
+              styles.chipBlur,
+              {
+                borderRadius: 32,
+                overflow: 'hidden',
+                borderColor: glassStyle.borderColor,
+                borderWidth: glassStyle.borderWidth,
+                backgroundColor: glassStyle.backgroundColor
+              }
+            ]}
+          >
+            <LiquidTexture opacity={0.1} />
+            <GlassReflection opacity={0.2} />
             <TouchableOpacity
               activeOpacity={0.8}
               onPress={() => onSelectChip(item)}
               style={[
                 styles.chip,
-                { backgroundColor: theme === 'dark' ? 'rgba(255,255,255,0.03)' : '#FFFFFF' },
-                theme === 'dark' && {
-                  // borderWidth: 1, // Removed to avoid double border
-                  // borderColor: 'rgba(255,255,255,0.15)',
-                  shadowColor: "#FFFFFF",
-                  shadowOffset: { width: 0, height: 1 },
-                  shadowOpacity: 0.1,
-                  shadowRadius: 1,
-                },
-                theme === 'light' && {
-                  shadowColor: "#000",
-                  shadowOffset: { width: 0, height: 4 },
-                  shadowOpacity: 0.1,
-                  shadowRadius: 10,
-                  elevation: 5
-                }
+                // Remove individual background colors as they are now handled by BlurView + GlassStyle
+                { backgroundColor: 'transparent' }
               ]}
             >
-              <Text style={[styles.chipTitle, { color: colors.text }]}>{item.title}</Text>
-              <Text style={[styles.chipSubtitle, { color: colors.textSecondary }]}>{item.subtitle}</Text>
+              <Text style={[styles.chipTitle, { color: colors.text }, glassTextStyle]}>{item.title}</Text>
+              <Text style={[styles.chipSubtitle, { color: colors.textSecondary }, glassTextStyle]}>{item.subtitle}</Text>
             </TouchableOpacity>
           </BlurView>
         )}
@@ -1182,7 +1383,17 @@ export default function HomeScreen() {
             }}
           />
         )}
-        <Text style={[styles.messageText, role !== 'user' && { color: colors.text }]}>{textContent}</Text>
+        <Text style={[styles.messageText, role !== 'user' && { color: colors.text }]}>{
+          textContent
+            ? textContent
+                .replace(/\*\*\*(.*?)\*\*\*/g, '$1')
+                .replace(/\*\*(.*?)\*\*/g, '$1')
+                .replace(/\*(.*?)\*/g, '$1')
+                .replace(/^#{1,4}\s+/gm, '')
+                .replace(/^[-]\s+/gm, '• ')
+                .replace(/`([^`]+)`/g, '$1')
+            : ''
+        }</Text>
         {isAction && <Ionicons name="chevron-down" size={18} color={colors.text} />}
       </BubbleComponent>
     );
@@ -1196,8 +1407,21 @@ export default function HomeScreen() {
     );
   }
 
+  /* Header with Glass Effect */
+  const glassStyle = getGlassStyle(theme);
+  const glassTextStyle = getGlassTextStyle(theme);
+
   return (
-    <View style={[styles.container, { paddingTop: insets.top, backgroundColor: colors.background }]}>
+    <View style={[styles.container, { paddingTop: insets.top }]}>
+      <LinearGradient
+        colors={theme === 'dark' ? BACKGROUND_GRADIENT : ['#E8F1F8', '#F3F4F6', '#FFFFFF']}
+        start={{ x: 0.1, y: 0.1 }}
+        end={{ x: 0.9, y: 0.9 }}
+        style={StyleSheet.absoluteFill}
+      />
+
+      {/* LiquidTexture and Orbs removed for flat design */}
+
       <KeyboardAvoidingView
         style={styles.flex}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
@@ -1205,72 +1429,85 @@ export default function HomeScreen() {
       >
         {/* Header */}
         <View style={[styles.headerBar, { height: HEADER_HEIGHT }]}>
-          <TouchableOpacity
-            activeOpacity={0.7}
+          <BlurView
+            intensity={20}
+            tint={theme === 'dark' ? "dark" : "light"}
             style={[
               styles.circleBtn,
-              { backgroundColor: colors.pillBackground, borderColor: colors.pillBorder },
-              theme === 'light' && {
-                backgroundColor: '#FFFFFF',
-                borderColor: '#F3F4F6',
-                shadowColor: "#000",
-                shadowOffset: { width: 0, height: 2 },
-                shadowOpacity: 0.05,
-                shadowRadius: 6,
-                elevation: 3
+              {
+                borderColor: glassStyle.borderColor,
+                borderWidth: glassStyle.borderWidth,
+                backgroundColor: theme === 'dark' ? 'rgba(22, 27, 35, 0.15)' : 'rgba(255, 255, 255, 0.15)',
+                overflow: 'hidden' // Important for BlurView to clip
               }
             ]}
-            onPress={() => setShowHistory(true)}
           >
-            <Ionicons name="menu-outline" size={24} color={colors.text} />
-          </TouchableOpacity>
+            <LiquidTexture opacity={0.1} />
+            <NoiseTexture opacity={0.2} />
+            <TouchableOpacity
+              activeOpacity={0.7}
+              style={{ flex: 1, alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%' }}
+              onPress={() => setShowHistory(true)}
+            >
+              <Ionicons name="menu-outline" size={24} color={colors.text} />
+            </TouchableOpacity>
+          </BlurView>
 
-          <View style={[
-            styles.newChatPill,
-            { backgroundColor: colors.pillBackground, borderColor: colors.pillBorder },
-            theme === 'light' && {
-              backgroundColor: '#FFFFFF',
-              borderColor: '#F3F4F6',
-              shadowColor: "#000",
-              shadowOffset: { width: 0, height: 2 },
-              shadowOpacity: 0.05,
-              shadowRadius: 6,
-              elevation: 3
-            }
-          ]}>
-            <Text style={[styles.newChatText, { color: colors.textTertiary }]} numberOfLines={1}>
-              {chatTitle}
-            </Text>
-          </View>
+          <BlurView
+            intensity={20}
+            tint={theme === 'dark' ? "dark" : "light"}
+            style={[
+              styles.newChatPill,
+              {
+                borderColor: glassStyle.borderColor,
+                borderWidth: glassStyle.borderWidth,
+                backgroundColor: theme === 'dark' ? 'rgba(22, 27, 35, 0.15)' : 'rgba(255, 255, 255, 0.15)',
+                overflow: 'hidden'
+              }
+            ]}
+          >
+            <LiquidTexture opacity={0.1} />
+            <NoiseTexture opacity={0.2} />
+            <GlassReflection />
+            <View style={{ paddingHorizontal: 24, paddingVertical: 10 }}>
+              <Text style={[styles.newChatText, { color: glassTextStyle.color }, glassTextStyle]} numberOfLines={1}>
+                {chatTitle}
+              </Text>
+            </View>
+          </BlurView>
 
-          <TouchableOpacity
-            activeOpacity={0.7}
+          <BlurView
+            intensity={20}
+            tint={theme === 'dark' ? "dark" : "light"}
             style={[
               styles.circleBtn,
-              { backgroundColor: colors.pillBackground, borderColor: colors.pillBorder },
-              theme === 'light' && {
-                backgroundColor: '#FFFFFF',
-                borderColor: '#F3F4F6',
-                shadowColor: "#000",
-                shadowOffset: { width: 0, height: 2 },
-                shadowOpacity: 0.05,
-                shadowRadius: 6,
-                elevation: 3
+              {
+                borderColor: glassStyle.borderColor,
+                borderWidth: glassStyle.borderWidth,
+                backgroundColor: theme === 'dark' ? 'rgba(22, 27, 35, 0.15)' : 'rgba(255, 255, 255, 0.15)',
+                overflow: 'hidden'
               }
             ]}
-            onPress={() => {
-              Keyboard.dismiss();
-              setMessages([WELCOME_MESSAGE]);
-              setCurrentSessionId(null);
-              setChatTitle('New Chat'); // Reset Title
-            }}
           >
-            <Ionicons name="create-outline" size={22} color={colors.text} />
-          </TouchableOpacity>
+            <LiquidTexture opacity={0.1} />
+            <NoiseTexture opacity={0.2} />
+            <TouchableOpacity
+              activeOpacity={0.7}
+              style={{ flex: 1, alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%' }}
+              onPress={() => {
+                Keyboard.dismiss();
+                setMessages([WELCOME_MESSAGE]);
+                setCurrentSessionId(null);
+                setChatTitle('New Chat'); // Reset Title
+              }}
+            >
+              <Ionicons name="create-outline" size={22} color={colors.text} />
+            </TouchableOpacity>
+          </BlurView>
         </View>
 
         {/* Body */}
-        <View style={[styles.body, { paddingBottom: bottomPadding }]}>
+        <View style={styles.body}>
           <View style={styles.chatContainer}>
             {focused && chatStarted && (
               <Pressable
@@ -1318,35 +1555,30 @@ export default function HomeScreen() {
           </View>
 
           {/* Input + Chips */}
-          <View style={styles.bottomSection}>
+          <View style={[styles.bottomSection, { paddingBottom: bottomPadding }]}>
             {!chatStarted && (
               <FeatureChipsBar onSelectChip={handleChipSelect} />
             )}
 
-            <BlurView intensity={theme === 'dark' ? 30 : 0} tint={theme === 'dark' ? "dark" : "light"} style={[
-              styles.inputContainerBlur,
-              { borderColor: theme === 'dark' ? 'rgba(255,255,255,0.2)' : colors.divider },
-              theme === 'dark' && {
-                backgroundColor: 'rgba(255,255,255,0.05)',
-                shadowColor: "#FFFFFF",
-                shadowOffset: { width: 0, height: 0 },
-                shadowOpacity: 0.1,
-                shadowRadius: 4,
-              },
-              theme === 'light' && {
-                backgroundColor: '#FFFFFF',
-                borderWidth: 0,
-                shadowColor: "#000",
-                shadowOffset: { width: 0, height: 4 },
-                shadowOpacity: 0.08,
-                shadowRadius: 10,
-                elevation: 5
-              }
-            ]}>
+            <BlurView
+              intensity={25}
+              tint={theme === 'dark' ? "dark" : "light"}
+              style={[
+                styles.inputContainerBlur,
+                {
+                  borderColor: glassStyle.borderColor,
+                  borderWidth: glassStyle.borderWidth,
+                  backgroundColor: theme === 'dark' ? 'rgba(22, 27, 35, 0.15)' : 'rgba(255, 255, 255, 0.15)',
+                }
+              ]}
+            >
+              <LiquidTexture opacity={0.05} />
+              <NoiseTexture opacity={0.15} />
+              <GlassReflection opacity={0.15} />
               <View style={[
                 styles.inputInner,
-                { backgroundColor: colors.inputBackground },
-                theme === 'light' && { backgroundColor: 'transparent' }
+                // Remove solid background completely
+                { backgroundColor: 'transparent' }
               ]}>
                 <TouchableOpacity
                   style={styles.plusBtn}
@@ -1358,10 +1590,10 @@ export default function HomeScreen() {
                 <TextInput
                   ref={inputRef}
                   placeholder="Plan your trip"
-                  placeholderTextColor={colors.textTertiary}
+                  placeholderTextColor={theme === 'dark' ? '#9CA3AF' : colors.textTertiary}
                   value={inputValue}
                   onChangeText={setInputValue}
-                  style={[styles.glassInput, { color: colors.text }]}
+                  style={[styles.glassInput, { color: colors.text }, glassTextStyle]}
                   multiline={false}
                   onFocus={() => setFocused(true)}
                   onBlur={() => setFocused(false)}
@@ -1423,14 +1655,7 @@ export default function HomeScreen() {
           setShowHistory(false);
         }}
         onDeleteSession={async (id) => {
-          const stored =
-            await AsyncStorage.getItem(SESSION_STORAGE_KEY);
-          const sessions = stored ? JSON.parse(stored) : {};
-          delete sessions[id];
-          await AsyncStorage.setItem(
-            SESSION_STORAGE_KEY,
-            JSON.stringify(sessions)
-          );
+          await deleteSessionFromStorage(id);
           if (currentSessionId === id) {
             setMessages([
               WELCOME_MESSAGE,
@@ -1453,30 +1678,30 @@ const styles = StyleSheet.create({
 
   // Header
   headerBar: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 20,
     marginTop: 10,
-    zIndex: 10,
+    zIndex: 100,
   },
   circleBtn: {
     width: 44,
     height: 44,
     borderRadius: 22,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.1)',
-    backgroundColor: '#161B23', // Slightly lighter than bg
+    overflow: 'hidden',
     alignItems: 'center',
     justifyContent: 'center',
+    // backgroundColor: '#161B23',  <-- REMOVED
   },
   newChatPill: {
-    paddingHorizontal: 24,
-    paddingVertical: 10,
     borderRadius: 30,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.1)',
-    backgroundColor: '#161B23',
+    overflow: 'hidden',
+    // backgroundColor: '#161B23', <-- REMOVED
   },
   newChatText: {
     color: '#D1D5DB',
@@ -1522,11 +1747,17 @@ const styles = StyleSheet.create({
   // Chat List
   chatContent: {
     paddingHorizontal: 16,
-    paddingTop: 16,
+    paddingTop: 80,
+    paddingBottom: 160,
   },
 
   // Bottom Section
   bottomSection: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    zIndex: 100,
     paddingHorizontal: 20,
     justifyContent: 'flex-end',
   },
@@ -1571,9 +1802,9 @@ const styles = StyleSheet.create({
   inputInner: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 8, // Taller pill
+    paddingVertical: 8,
     paddingHorizontal: 6,
-    backgroundColor: 'rgba(20, 25, 33, 0.7)',
+    // backgroundColor: 'rgba(20, 25, 33, 0.7)', <-- REMOVED
   },
   plusBtn: {
     width: 40,
@@ -1780,20 +2011,21 @@ const styles = StyleSheet.create({
     // backgroundColor handled inline for theme
   },
   drawerHeader: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 10,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 20,
     paddingBottom: 20,
-    marginTop: 10,
   },
   historyPill: {
     paddingHorizontal: 24,
     paddingVertical: 10,
     borderRadius: 30,
-    backgroundColor: '#161B23',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.1)',
   },
   historyPillText: {
     color: '#E8EDF7',
@@ -1827,14 +2059,17 @@ const styles = StyleSheet.create({
     fontFamily: 'Raleway',
   },
 
-  // Profile Bar
   profileBar: {
+    position: 'absolute',
+    // Bottom/Left/Right handled inline for safe area
+    zIndex: 10,
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 16, // Smaller padding for pill
-    marginHorizontal: 20,
-    marginBottom: 40,
-    borderRadius: 40, // Pill shape
+    padding: 16,
+    // marginHorizontal: 20, handled by left/right
+    // marginBottom: 40, handled by bottom
+    // borderRadius: 40, handled inline
+    borderTopWidth: 0,
   },
   profileAvatar: {
     width: 48,

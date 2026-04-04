@@ -1,5 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
+import * as WebBrowser from 'expo-web-browser'; // Correctly placed import
 import {
     Dimensions,
     Modal,
@@ -10,8 +11,10 @@ import {
     View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { getGlassStyle, getGlassTextStyle } from '../constants/GlassStyles';
 import { useTheme } from '../context/ThemeContext';
-import * as WebBrowser from 'expo-web-browser'; // Correctly placed import
+import { GlassReflection } from './ui/GlassReflection';
+import { LiquidTexture } from './ui/LiquidTexture';
 
 const { width } = Dimensions.get('window');
 
@@ -30,7 +33,7 @@ const PaymentSheet = ({ visible, onClose, plan }) => {
 
 
 
-// ... imports ...
+    // ... imports ...
 
     const formatPrice = (price) => {
         return new Intl.NumberFormat('en-US', {
@@ -39,13 +42,35 @@ const PaymentSheet = ({ visible, onClose, plan }) => {
         }).format(price);
     };
 
+    const normalizeZenBookingUrl = (rawUrl, item) => {
+        try {
+            const parsed = new URL(rawUrl);
+            const host = (parsed.hostname || '').replace(/^www\./, '').toLowerCase();
+            if (host !== 'zenhotels.com') return rawUrl;
+
+            const roomPath = /^\/rooms\/([^/]+)\/?$/i.exec(parsed.pathname || '');
+            if (!roomPath) return rawUrl;
+
+            const roomId = String(roomPath[1] || '').trim();
+            if (/^\d+$/.test(roomId)) return rawUrl;
+
+            // Recover from broken deep links stored in old plans.
+            const params = new URLSearchParams(parsed.search || '');
+            const q = `${item?.provider || ''} ${plan?.location || ''}`.trim();
+            if (q) params.set('q', q);
+            return `https://www.zenhotels.com/hotels/?${params.toString()}`;
+        } catch {
+            return rawUrl;
+        }
+    };
+
     const handlePayNow = async (item) => {
         const itemType = (item.item || '').toLowerCase();
         const provider = (item.provider || '').toLowerCase();
         let url = item.booking_url || 'https://www.google.com/search?q=book+trip'; // Use AI URL if available
 
         if (item.booking_url) {
-             // Fall through to openBrowser with the explicit URL
+            url = normalizeZenBookingUrl(item.booking_url, item);
         }
         // 1. Transfers -> GetTransfer (Explicit user request)
         else if (itemType.includes('transfer') || provider.includes('get transfer')) {
@@ -59,13 +84,13 @@ const PaymentSheet = ({ visible, onClose, plan }) => {
         }
         // 3. Hotels -> Search
         else if (itemType.includes('hotel') || itemType.includes('stay') || provider.includes('hotel')) {
-             const query = `book hotel ${item.provider || ''} ${plan.location || ''}`.trim();
-             url = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+            const query = `book hotel ${item.provider || ''} ${plan.location || ''}`.trim();
+            url = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
         }
         // 4. Excursions/Others -> Search
         else {
-             const query = `book ${item.item} ${item.provider || ''} ${plan.location || ''}`.trim();
-             url = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+            const query = `book ${item.item} ${item.provider || ''} ${plan.location || ''}`.trim();
+            url = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
         }
 
         try {
@@ -80,6 +105,9 @@ const PaymentSheet = ({ visible, onClose, plan }) => {
     };
 
 
+    const glassStyle = getGlassStyle(theme);
+    const glassTextStyle = getGlassTextStyle(theme);
+
     return (
         <Modal
             transparent
@@ -88,68 +116,89 @@ const PaymentSheet = ({ visible, onClose, plan }) => {
             onRequestClose={onClose}
         >
             <BlurView
-                intensity={theme === 'light' ? 40 : 95}
+                intensity={glassStyle.shadowOpacity * 100 + 60}
                 tint={theme === 'light' ? 'light' : 'dark'}
                 style={[
                     styles.container,
-                    theme === 'light' && { backgroundColor: 'rgba(240,240,240,0.85)' }
+                    { backgroundColor: glassStyle.backgroundColor.replace('0.03', '0.01') } // Even more transparent for full screen
                 ]}
             >
+                <LiquidTexture opacity={0.1} scale={2} />
+                <GlassReflection opacity={0.05} />
                 <View style={[styles.header, { paddingTop: insets.top }]}>
-                    <TouchableOpacity
+                    <BlurView
+                        intensity={glassStyle.shadowOpacity * 100 + 50}
+                        tint={theme === 'light' ? 'light' : 'dark'}
                         style={[
                             styles.circleBtn,
-                            theme === 'light' && { backgroundColor: '#FFFFFF', borderColor: '#E5E7EB' }
+                            {
+                                borderColor: glassStyle.borderColor,
+                                borderWidth: glassStyle.borderWidth,
+                                backgroundColor: glassStyle.backgroundColor,
+                                overflow: 'hidden'
+                            }
                         ]}
-                        onPress={onClose}
                     >
-                        <Ionicons name="close" size={24} color={colors.text} />
-                    </TouchableOpacity>
-                    <View style={[
-                        styles.headerPill,
-                        theme === 'light' && { backgroundColor: '#FFFFFF', borderColor: '#E5E7EB' }
-                    ]}>
-                        <Text style={[styles.headerTitle, { color: colors.text }]}>Trip Payment</Text>
-                    </View>
+                        <TouchableOpacity
+                            style={{ flex: 1, alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%' }}
+                            onPress={onClose}
+                        >
+                            <Ionicons name="close" size={24} color={colors.text} />
+                        </TouchableOpacity>
+                    </BlurView>
+                    <BlurView
+                        intensity={glassStyle.shadowOpacity * 100 + 50}
+                        tint={theme === 'light' ? 'light' : 'dark'}
+                        style={[
+                            styles.headerPill,
+                            {
+                                borderColor: glassStyle.borderColor,
+                                borderWidth: glassStyle.borderWidth,
+                                backgroundColor: glassStyle.backgroundColor,
+                                overflow: 'hidden'
+                            }
+                        ]}
+                    >
+                        <View style={{ paddingHorizontal: 24, paddingVertical: 10 }}>
+                            <Text style={[styles.headerTitle, { color: colors.text }, glassTextStyle]}>Trip Payment</Text>
+                        </View>
+                    </BlurView>
                     <View style={styles.spacer} />
                 </View>
 
                 <ScrollView contentContainerStyle={styles.listContent} showsVerticalScrollIndicator={false}>
                     {items.map((item, index) => (
-                        <View
+                        <BlurView
+                            intensity={30} // Cards inside can be less intense
+                            tint={theme === 'light' ? 'light' : 'dark'}
                             key={index}
                             style={[
                                 styles.cardItem,
-                                theme === 'light' ? {
-                                    backgroundColor: '#FFFFFF',
-                                    borderRadius: 24, // Rounder as per mockup
-                                    shadowColor: "#000",
-                                    shadowOffset: { width: 0, height: 4 },
-                                    shadowOpacity: 0.08,
-                                    shadowRadius: 12,
-                                    elevation: 6,
-                                    borderWidth: 0
-                                } : {
-                                    backgroundColor: '#131820',
-                                    borderColor: 'rgba(255,255,255,0.05)'
+                                {
+                                    borderColor: glassStyle.borderColor,
+                                    borderWidth: glassStyle.borderWidth,
+                                    backgroundColor: 'rgba(255,255,255,0.02)', // Slightly distinct from bg
+                                    overflow: 'hidden'
                                 }
                             ]}
                         >
+                            <LiquidTexture opacity={0.1} />
+                            <GlassReflection opacity={0.15} />
                             <View style={styles.itemInfo}>
-                                <Text style={[styles.itemName, { color: colors.text }]}>{item.item}</Text>
+                                <Text style={[styles.itemName, { color: colors.text }, glassTextStyle]}>{item.item}</Text>
                                 <Text style={[styles.itemProvider, { color: colors.textSecondary }]}>
-                                    {(item.raw && item.raw.airline) 
-                                        ? item.raw.airline.split(/[\/\?,(]/)[0].trim() 
+                                    {(item.raw && item.raw.airline)
+                                        ? item.raw.airline.split(/[\/\?,(]/)[0].trim()
                                         : (item.provider ? item.provider.split(/[\/\?,(]/)[0].trim() : '')}
                                 </Text>
                             </View>
                             <View style={styles.itemActions}>
-                                <Text style={[styles.itemPrice, { color: colors.text }]}>{formatPrice(item.price)}</Text>
+                                <Text style={[styles.itemPrice, { color: colors.text }, glassTextStyle]}>{formatPrice(item.price)}</Text>
                                 <TouchableOpacity style={styles.payButton} onPress={() => handlePayNow(item)}>
                                     <Text style={styles.payButtonText}>Pay Now</Text>
                                 </TouchableOpacity>
                             </View>
-                        </View>
+                        </BlurView>
                     ))}
                 </ScrollView>
 
@@ -197,19 +246,11 @@ const styles = StyleSheet.create({
         width: 44,
         height: 44,
         borderRadius: 22,
-        borderWidth: 1,
-        borderColor: 'rgba(255,255,255,0.1)',
-        backgroundColor: '#161B23',
         alignItems: 'center',
         justifyContent: 'center',
     },
     headerPill: {
-        paddingHorizontal: 24,
-        paddingVertical: 10,
         borderRadius: 30,
-        backgroundColor: '#161B23',
-        borderWidth: 1,
-        borderColor: 'rgba(255,255,255,0.1)',
     },
     headerTitle: {
         fontSize: 16,
