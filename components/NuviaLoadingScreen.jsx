@@ -5,7 +5,7 @@ import { Animated, StyleSheet, View } from 'react-native';
 import Svg, { G, Path } from 'react-native-svg';
 
 const SkyImage = require('../assets/images/nuvia-sky-mobile.jpg');
-const RockImage = require('../assets/images/nuvia-rock-mobile.jpg');
+const RockImage = require('../assets/images/nuvia-rock-mobile.png');
 
 export const NuviaLogo = ({ width = 235, opacity = 0.86 }) => (
   <Svg width={width} height={(width / 561) * 168} viewBox="0 0 561 168" fill="none">
@@ -124,7 +124,7 @@ export default function NuviaLoadingScreen({
       ) : null}
       <LinearGradient
         colors={['rgba(8,12,18,0.14)', 'rgba(8,12,18,0.62)']}
-        style={StyleSheet.absoluteFill}
+        style={styles.overlay}
       />
       {children ? (
         <Animated.View
@@ -159,6 +159,7 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     width: '100%',
     height: '100%',
+    zIndex: 1,
   },
   rockLayer: {
     position: 'absolute',
@@ -167,6 +168,7 @@ const styles = StyleSheet.create({
     bottom: '-7%',
     width: '100%',
     height: '110%',
+    zIndex: 3,
   },
   logoWrap: {
     position: 'absolute',
@@ -180,12 +182,16 @@ const styles = StyleSheet.create({
     shadowRadius: 24,
     shadowOffset: { width: 0, height: 12 },
   },
+  overlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 4,
+  },
   content: {
     ...StyleSheet.absoluteFillObject,
     justifyContent: 'flex-end',
     paddingHorizontal: 22,
     paddingBottom: 58,
-    zIndex: 4,
+    zIndex: 5,
   },
   homeIndicator: {
     position: 'absolute',
@@ -193,7 +199,7 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 10,
     alignItems: 'center',
-    zIndex: 5,
+    zIndex: 6,
   },
   homeIndicatorBar: {
     width: 92,

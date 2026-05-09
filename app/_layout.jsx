@@ -41,7 +41,7 @@ export default function RootLayout() {
           require('../assets/images/LoadingScreen.png'),
           require('../assets/images/glass.png'),
           require('../assets/images/nuvia-sky-mobile.jpg'),
-          require('../assets/images/nuvia-rock-mobile.jpg'),
+          require('../assets/images/nuvia-rock-mobile.png'),
         ];
         const cacheImages = images.map(image => Asset.fromModule(image).downloadAsync());
         await Promise.all(cacheImages);
