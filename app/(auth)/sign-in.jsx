@@ -2,17 +2,14 @@ import { Ionicons } from '@expo/vector-icons';
 import { makeRedirectUri } from 'expo-auth-session';
 import { BlurView } from 'expo-blur';
 import { useRouter } from 'expo-router';
-import { StatusBar } from 'expo-status-bar';
 import * as WebBrowser from 'expo-web-browser';
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Dimensions, Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import LoadingScreenImg from '../../assets/images/LoadingScreen.png';
+import { ActivityIndicator, Alert, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import NuviaLoadingScreen from '../../components/NuviaLoadingScreen';
 import { supabase } from '../../lib/supabase';
 
 // Ensure WebBrowser finishes cleanly
 WebBrowser.maybeCompleteAuthSession();
-
-const { width, height } = Dimensions.get('window');
 
 const redirectTo = makeRedirectUri({
     scheme: 'nuviatravel',
@@ -31,7 +28,7 @@ export default function SignInScreen() {
             }
         });
         return () => subscription.unsubscribe();
-    }, []);
+    }, [router]);
 
     const handleSignIn = async (provider) => {
         if (provider === 'phone') {
@@ -87,23 +84,8 @@ export default function SignInScreen() {
     };
 
     return (
-        <View style={styles.container}>
-            <StatusBar hidden />
-
-            {/* Background PNG */}
-            <Image
-                source={LoadingScreenImg}
-                style={[StyleSheet.absoluteFill, { width: width, height: height }]}
-                resizeMode="cover"
-            />
-
-            {/* Content */}
-            <View style={styles.content}>
-
-                {/* Spacer to push buttons down since Logo is gone */}
-                <View style={{ flex: 1 }} />
-
-                {/* Bottom Buttons */}
+        <NuviaLoadingScreen contentStyle={styles.content}>
+            <View style={styles.contentInner}>
                 <View style={styles.buttonContainer}>
                     {loading && <ActivityIndicator size="large" color="#fff" style={{ marginBottom: 20 }} />}
 
@@ -132,48 +114,54 @@ export default function SignInScreen() {
 
                     {/* Guest Mode Link */}
                     <TouchableOpacity style={{ alignSelf: 'center', marginTop: 10 }} onPress={() => router.replace('/(tabs)')}>
-                        <Text style={{ color: 'rgba(255,255,255,0.6)', fontFamily: 'Raleway_600SemiBold' }}>Continue as Guest</Text>
+                        <Text style={styles.guestText}>Continue as Guest</Text>
                     </TouchableOpacity>
                 </View>
             </View>
-        </View>
+        </NuviaLoadingScreen>
     );
 }
 
 const styles = StyleSheet.create({
-    container: {
-        flex: 1,
-        backgroundColor: '#000', // Fallback
-    },
     content: {
-        flex: 1,
-        justifyContent: 'space-between',
-        paddingBottom: 60, // Space from bottom
-        paddingHorizontal: 20,
+        paddingBottom: 58,
+        paddingHorizontal: 22,
+    },
+    contentInner: {
+        width: '100%',
+        alignItems: 'center',
     },
     buttonContainer: {
-        gap: 16,
+        gap: 12,
         width: '100%',
-        maxWidth: 400,
+        maxWidth: 330,
         alignSelf: 'center',
     },
     glassButton: {
         flexDirection: 'row',
         alignItems: 'center',
         justifyContent: 'center',
-        paddingVertical: 18,
+        minHeight: 46,
+        paddingVertical: 12,
+        paddingHorizontal: 18,
         borderRadius: 30,
         overflow: 'hidden',
-        backgroundColor: 'rgba(20, 25, 30, 0.6)', // Semi-transparent dark
+        backgroundColor: 'rgba(255,255,255,0.06)',
         borderWidth: 1,
-        borderColor: 'rgba(255,255,255,0.15)',
+        borderColor: 'rgba(255,255,255,0.18)',
     },
     icon: {
-        marginRight: 10,
+        position: 'absolute',
+        left: 20,
     },
     buttonText: {
         color: '#fff',
-        fontSize: 16,
-        fontFamily: 'Raleway_600SemiBold',
+        fontSize: 13,
+        fontFamily: 'Raleway-SemiBold',
+    },
+    guestText: {
+        color: 'rgba(255,255,255,0.64)',
+        fontSize: 13,
+        fontFamily: 'Raleway-SemiBold',
     },
 });
