@@ -1,0 +1,19 @@
+# dependencies
+node_modules/
+
+# Expo/build output
+.expo/
+dist/
+web-build/
+
+# local scratch and logs
+.claude/
+.codex-expo*.log
+.codex_tmp_*/
+hs_err_pid*.log
+replay_pid*.log
+web-app/
+web-app-publish/
+
+# nested backend repo is deployed separately
+travelapi_backend/
