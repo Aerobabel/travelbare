@@ -7,7 +7,7 @@ import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import { BlurView } from 'expo-blur';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, {
   useCallback,
   useEffect,
@@ -63,6 +63,9 @@ const WELCOME_MESSAGE = {
 
 const SESSION_STORAGE_KEY = 'travel_chat_sessions';
 const CHAT_SESSIONS_TABLE = 'chat_sessions';
+const EDIT_PLAN_STORAGE_KEY = 'travel_edit_plan_context';
+const EDIT_PLAN_PROMPT_STORAGE_KEY = 'travel_edit_plan_prompt';
+const EDIT_PLAN_RETURN_STORAGE_KEY = 'travel_edit_plan_return_context';
 
 let globalMessageIdCounter = 0;
 const generateUniqueId = (prefix = 'msg') => {
@@ -71,6 +74,8 @@ const generateUniqueId = (prefix = 'msg') => {
     .toString(36)
     .substring(2, 9)}-${globalMessageIdCounter}`;
 };
+
+const paramString = (value) => (Array.isArray(value) ? value[0] : value);
 
 const CHAT_API_BASE =
   process.env.EXPO_PUBLIC_API_BASE ?? 'https://travelapi-34zi.onrender.com';
@@ -96,9 +101,24 @@ const getWeatherIconName = (rawIcon) => {
 };
 
 // --- Storage Logic ---
+const sanitizeSessionPreview = (preview) => {
+  const text = String(preview || 'New Trip...').trim();
+  return /^[\[{(]?\s*SYSTEM[_\s-]*CONTEXT[\]})]?/i.test(text) ? 'Editing trip...' : text;
+};
+
+const sanitizeSessionsMap = (sessionsMap = {}) =>
+  Object.fromEntries(
+    Object.entries(sessionsMap).map(([id, session]) => [
+      id,
+      session && typeof session === 'object'
+        ? { ...session, preview: sanitizeSessionPreview(session.preview) }
+        : session,
+    ])
+  );
+
 const safeParseSessions = (raw) => {
   try {
-    return raw ? JSON.parse(raw) : {};
+    return raw ? sanitizeSessionsMap(JSON.parse(raw)) : {};
   } catch {
     return {};
   }
@@ -107,10 +127,20 @@ const safeParseSessions = (raw) => {
 const sortedSessions = (sessionsMap) =>
   Object.values(sessionsMap).sort((a, b) => b.timestamp - a.timestamp);
 
+const isMissingSupabaseTableError = (error) =>
+  error?.code === '42P01' ||
+  error?.code === 'PGRST205' ||
+  String(error?.message || '').toLowerCase().includes('could not find the table');
+
+const isAuthCacheMiss = (error) =>
+  String(error?.name || '').includes('Auth') ||
+  String(error?.message || '').toLowerCase().includes('refresh') ||
+  String(error?.message || '').toLowerCase().includes('session');
+
 const toCloudSessionRow = (session, userId) => ({
   user_id: userId,
   session_id: session.id,
-  preview: session.preview,
+  preview: sanitizeSessionPreview(session.preview),
   timestamp: session.timestamp,
   messages: session.messages,
   custom_title: !!session.customTitle,
@@ -119,7 +149,7 @@ const toCloudSessionRow = (session, userId) => ({
 
 const toLocalSessionEntry = (row) => ({
   id: row.session_id,
-  preview: row.preview || 'New Trip...',
+  preview: sanitizeSessionPreview(row.preview),
   timestamp:
     typeof row.timestamp === 'number'
       ? row.timestamp
@@ -135,15 +165,23 @@ async function upsertSessionsToCloud(sessions, userId) {
     .from(CHAT_SESSIONS_TABLE)
     .upsert(payload, { onConflict: 'user_id,session_id' });
   if (error) {
+    if (isMissingSupabaseTableError(error)) return;
     console.error('Failed to sync chat sessions to cloud', error);
   }
 }
 
 async function getCurrentUserId() {
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  return user?.id || null;
+  try {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    return user?.id || null;
+  } catch (error) {
+    if (!isAuthCacheMiss(error)) {
+      console.error('Failed to read auth user', error);
+    }
+    return null;
+  }
 }
 
 async function loadSessionsFromStorageAndCloud(userId = null) {
@@ -164,6 +202,7 @@ async function loadSessionsFromStorageAndCloud(userId = null) {
     .order('timestamp', { ascending: false });
 
   if (error) {
+    if (isMissingSupabaseTableError(error)) return sortedSessions(localSessionsMap);
     console.error('Failed to load cloud sessions', error);
     return sortedSessions(localSessionsMap);
   }
@@ -181,13 +220,16 @@ async function loadSessionsFromStorageAndCloud(userId = null) {
 async function saveSessionToStorage(messages, currentSessionId, explicitUserId = null) {
   if (messages.length <= 2 || !currentSessionId) return;
   try {
-    const firstUserMsg = messages.find((m) => m.role === 'user');
+    const visibleMessages = messages.filter((m) => !m.hidden);
+    const firstUserMsg = visibleMessages.find((m) => m.role === 'user');
     let preview = 'New Trip';
 
     if (firstUserMsg) {
       if (typeof firstUserMsg.content === 'string') preview = firstUserMsg.content;
       else if (firstUserMsg.text) preview = firstUserMsg.text;
       else if (Array.isArray(firstUserMsg.content)) preview = 'Image Analysis';
+    } else if (messages.some((m) => String(m.id || '').startsWith('edit-plan-'))) {
+      preview = 'Editing trip';
     }
 
     const stored = await AsyncStorage.getItem(SESSION_STORAGE_KEY);
@@ -231,6 +273,7 @@ async function deleteSessionFromStorage(sessionId, explicitUserId = null) {
     .eq('user_id', userId)
     .eq('session_id', sessionId);
   if (error) {
+    if (isMissingSupabaseTableError(error)) return;
     console.error('Failed to delete cloud session', error);
   }
 }
@@ -259,13 +302,20 @@ async function renameSessionInStorage(sessionId, newName, explicitUserId = null)
     .eq('user_id', userId)
     .eq('session_id', sessionId);
   if (error) {
+    if (isMissingSupabaseTableError(error)) return;
     console.error('Failed to rename cloud session', error);
   }
 }
 
 async function callTravelBot(history) {
   const filteredHistory = history
-    .filter((m) => !m.loading && !m.hidden)
+    .filter((m) => {
+      if (m.loading) return false;
+      if (m.role === 'tool') return true;
+      if (!m.hidden) return true;
+      const text = String(m.text || m.content || '');
+      return text.startsWith('[SYSTEM_CONTEXT]');
+    })
     .map((m) => ({
       role: m.role,
       content: m.content || m.text,
@@ -450,9 +500,17 @@ const HistoryDrawer = ({
     let isMounted = true;
     if (visible) {
       (async () => {
-        const {
-          data: { user: authUser },
-        } = await supabase.auth.getUser();
+        let authUser = null;
+        try {
+          const {
+            data: { user },
+          } = await supabase.auth.getUser();
+          authUser = user || null;
+        } catch (error) {
+          if (!isAuthCacheMiss(error)) {
+            console.error('Failed to load auth user for history', error);
+          }
+        }
         if (!isMounted) return;
         setUser(authUser || null);
         const loaded = await loadSessionsFromStorageAndCloud(authUser?.id || null);
@@ -948,6 +1006,8 @@ export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const tabBarHeight = useBottomTabBarHeight();
   const { colors, theme } = useTheme(); // Theme Hook
+  const params = useLocalSearchParams();
+  const router = useRouter();
 
   // Load Fonts
   const [fontsLoaded] = useFonts({
@@ -959,6 +1019,7 @@ export default function HomeScreen() {
   const [messages, setMessages] = useState([WELCOME_MESSAGE]);
   const [currentSessionId, setCurrentSessionId] = useState(null);
   const [chatTitle, setChatTitle] = useState('New Chat'); // Default Title
+  const [editingPlanLabel, setEditingPlanLabel] = useState(null);
 
 
   const [showDatePicker, setShowDatePicker] = useState(false);
@@ -976,6 +1037,7 @@ export default function HomeScreen() {
   const flatListRef = useRef(null);
   const atBottomRef = useRef(true);
   const isDraggingRef = useRef(false);
+  const handledEditTokenRef = useRef(null);
   const inputHeight = useRef(new Animated.Value(56)).current;
 
   const HEADER_HEIGHT = 60;
@@ -1008,7 +1070,10 @@ export default function HomeScreen() {
 
   // Save sessions
   useEffect(() => {
-    if (messages.length > 2) {
+    const hasVisibleUserMessage = messages.some(
+      (message) => !message.hidden && !message.loading && message.role === 'user'
+    );
+    if (messages.length > 2 && hasVisibleUserMessage) {
       if (!currentSessionId) {
         const newId = Date.now().toString();
         setCurrentSessionId(newId);
@@ -1132,6 +1197,97 @@ export default function HomeScreen() {
     [processUserMessage]
   );
 
+  const resetChat = useCallback(() => {
+    Keyboard.dismiss();
+    setMessages([WELCOME_MESSAGE]);
+    setCurrentSessionId(null);
+    setChatTitle('New Chat');
+    setEditingPlanLabel(null);
+    setInputValue('');
+  }, []);
+
+  const cancelEditMode = useCallback(async () => {
+    Keyboard.dismiss();
+    setEditingPlanLabel(null);
+    setInputValue('');
+    setFocused(false);
+    setMessages((prev) =>
+      prev.filter((message) => !String(message.id || '').startsWith('edit-plan-'))
+    );
+    const returnPlan = await AsyncStorage.getItem(EDIT_PLAN_RETURN_STORAGE_KEY).catch(() => null);
+    AsyncStorage.removeItem(EDIT_PLAN_STORAGE_KEY).catch(() => {});
+    AsyncStorage.removeItem(EDIT_PLAN_PROMPT_STORAGE_KEY).catch(() => {});
+    AsyncStorage.removeItem(EDIT_PLAN_RETURN_STORAGE_KEY).catch(() => {});
+    if (router.canGoBack?.()) {
+      router.back();
+      return;
+    }
+    if (returnPlan) {
+      router.replace({
+        pathname: '/TripDetails',
+        params: { plan: returnPlan },
+      });
+      return;
+    }
+    setChatTitle('New Chat');
+    setCurrentSessionId(null);
+  }, [router]);
+
+  useEffect(() => {
+    const editTrip = paramString(params.editTrip);
+    const editToken = paramString(params.editToken);
+    if (editTrip !== 'true' || !editToken || handledEditTokenRef.current === editToken) return;
+
+    handledEditTokenRef.current = editToken;
+    let cancelled = false;
+
+    Promise.all([
+      AsyncStorage.getItem(EDIT_PLAN_STORAGE_KEY),
+      AsyncStorage.getItem(EDIT_PLAN_PROMPT_STORAGE_KEY),
+    ])
+      .then(([raw, editPrompt]) => {
+        if (cancelled) return;
+        let planContext = null;
+        try {
+          planContext = raw ? JSON.parse(raw) : null;
+        } catch {
+          planContext = null;
+        }
+
+        const destination = [planContext?.location, planContext?.country].filter(Boolean).join(', ') || 'this trip';
+        setChatTitle('Editing trip');
+        setEditingPlanLabel(destination);
+        setCurrentSessionId(null);
+        setMessages([
+          {
+            id: generateUniqueId('edit-plan-ai'),
+            role: 'ai',
+            text: `Let's edit your ${destination} plan. Tell me what you want to change.`,
+          },
+          {
+            id: generateUniqueId('edit-plan-context'),
+            role: 'system',
+            text: `[SYSTEM_CONTEXT] User wants to edit this existing trip plan: ${raw || destination}`,
+            hidden: true,
+          },
+        ]);
+        setInputValue(editPrompt || '');
+        if (editPrompt) AsyncStorage.removeItem(EDIT_PLAN_PROMPT_STORAGE_KEY).catch(() => {});
+        setFocused(true);
+        setTimeout(() => inputRef.current?.focus(), 250);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setInputValue('Edit this trip: ');
+        setFocused(true);
+        setTimeout(() => inputRef.current?.focus(), 250);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [params.editTrip, params.editToken]);
+
   // --- IMAGE PICKER (fixed) ---
   const pickImage = useCallback(async () => {
     try {
@@ -1215,8 +1371,8 @@ export default function HomeScreen() {
 
       const newHistory = [
         ...messages.filter((m) => !m.loading),
-        userMessage,
         ...toolMessages,
+        userMessage,
         {
           id: generateUniqueId('loading-dates'),
           role: 'ai',
@@ -1257,8 +1413,8 @@ export default function HomeScreen() {
 
       const newHistory = [
         ...messages.filter((m) => !m.loading),
-        userMessage,
         ...toolMessages,
+        userMessage,
         {
           id: generateUniqueId('loading-guests'),
           role: 'ai',
@@ -1410,6 +1566,7 @@ export default function HomeScreen() {
   /* Header with Glass Effect */
   const glassStyle = getGlassStyle(theme);
   const glassTextStyle = getGlassTextStyle(theme);
+  const isEditingPlan = Boolean(editingPlanLabel);
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -1469,10 +1626,15 @@ export default function HomeScreen() {
             <LiquidTexture opacity={0.1} />
             <NoiseTexture opacity={0.2} />
             <GlassReflection />
-            <View style={{ paddingHorizontal: 24, paddingVertical: 10 }}>
+            <View style={styles.headerTitleContent}>
               <Text style={[styles.newChatText, { color: glassTextStyle.color }, glassTextStyle]} numberOfLines={1}>
-                {chatTitle}
+                {isEditingPlan ? 'Editing trip' : chatTitle}
               </Text>
+              {isEditingPlan ? (
+                <Text style={[styles.editingSubtitle, { color: colors.textTertiary }]} numberOfLines={1}>
+                  {editingPlanLabel}
+                </Text>
+              ) : null}
             </View>
           </BlurView>
 
@@ -1480,7 +1642,7 @@ export default function HomeScreen() {
             intensity={20}
             tint={theme === 'dark' ? "dark" : "light"}
             style={[
-              styles.circleBtn,
+              isEditingPlan ? styles.cancelEditPill : styles.circleBtn,
               {
                 borderColor: glassStyle.borderColor,
                 borderWidth: glassStyle.borderWidth,
@@ -1494,14 +1656,13 @@ export default function HomeScreen() {
             <TouchableOpacity
               activeOpacity={0.7}
               style={{ flex: 1, alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%' }}
-              onPress={() => {
-                Keyboard.dismiss();
-                setMessages([WELCOME_MESSAGE]);
-                setCurrentSessionId(null);
-                setChatTitle('New Chat'); // Reset Title
-              }}
+              onPress={isEditingPlan ? cancelEditMode : resetChat}
             >
-              <Ionicons name="create-outline" size={22} color={colors.text} />
+              {isEditingPlan ? (
+                <Text style={[styles.cancelEditText, { color: colors.text }]}>Cancel</Text>
+              ) : (
+                <Ionicons name="create-outline" size={22} color={colors.text} />
+              )}
             </TouchableOpacity>
           </BlurView>
         </View>
@@ -1699,15 +1860,41 @@ const styles = StyleSheet.create({
     // backgroundColor: '#161B23',  <-- REMOVED
   },
   newChatPill: {
+    flex: 1,
+    marginHorizontal: 10,
     borderRadius: 30,
     overflow: 'hidden',
     // backgroundColor: '#161B23', <-- REMOVED
   },
+  headerTitleContent: {
+    minHeight: 44,
+    paddingHorizontal: 18,
+    paddingVertical: 7,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   newChatText: {
     color: '#D1D5DB',
-    fontSize: 16,
+    fontSize: 15,
     fontFamily: 'Raleway',
-    letterSpacing: 0.5,
+    letterSpacing: 0,
+  },
+  editingSubtitle: {
+    fontSize: 11,
+    fontFamily: 'Raleway',
+    marginTop: 2,
+  },
+  cancelEditPill: {
+    width: 74,
+    height: 44,
+    borderRadius: 22,
+    overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cancelEditText: {
+    fontSize: 13,
+    fontFamily: 'RalewaySemiBold',
   },
 
   body: { flex: 1 },

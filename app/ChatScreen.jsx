@@ -194,22 +194,22 @@ export default function ChatScreen() {
 
   /** send normal user text */
   const sendUser = async (text) => {
-    const trimmed = (text || ‘’).trim();
+    const trimmed = (text || '').trim();
     if (!trimmed) return;
 
-    setMessages((prev) => [...prev, { role: ‘user’, text: trimmed }]);
-    setInput(‘’);
+    setMessages((prev) => [...prev, { role: 'user', text: trimmed }]);
+    setInput('');
     setIsTyping(true);
 
     try {
-      const history = historyForServer(messages, { role: ‘user’, text: trimmed });
+      const history = historyForServer(messages, { role: 'user', text: trimmed });
       const { aiText, signal } = await callTravelBot(history);
       setIsTyping(false);
       if (signal) handleSignal(signal, aiText);
-      else if (aiText) setMessages((prev) => [...prev, { role: ‘ai’, text: aiText }]);
+      else if (aiText) setMessages((prev) => [...prev, { role: 'ai', text: aiText }]);
     } catch {
       setIsTyping(false);
-      setMessages((prev) => [...prev, { role: ‘ai’, text: ‘I couldn’t reach the server. Try again?’ }]);
+      setMessages((prev) => [...prev, { role: 'ai', text: "I couldn't reach the server. Try again?" }]);
     }
   };
 

@@ -1,4 +1,4 @@
-import { StyleSheet, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 import MapView, { Marker, Polyline, PROVIDER_DEFAULT, UrlTile } from 'react-native-maps';
 
 const LIGHT_MAP_STYLE = [
@@ -179,26 +179,170 @@ const DARK_MAP_STYLE = [
     }
 ];
 
-const RouteMap = ({ route, theme = 'dark' }) => {
-    if (!route || !route.start) return null;
+const toNumber = (value) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+};
 
-    // Convert array [lon, lat] to object { latitude, longitude }
-    const startCoords = { latitude: route.start[1], longitude: route.start[0] };
+const isValidCoordinate = (latitude, longitude) =>
+    latitude !== null &&
+    longitude !== null &&
+    latitude >= -90 &&
+    latitude <= 90 &&
+    longitude >= -180 &&
+    longitude <= 180;
 
-    let endCoords = null;
-    if (route.end) {
-        endCoords = { latitude: route.end[1], longitude: route.end[0] };
+const cleanCoordinate = (point) => ({
+    latitude: point.latitude,
+    longitude: point.longitude,
+});
+
+const pointFromArray = (value) => {
+    if (!Array.isArray(value) || value.length < 2) return null;
+    const longitude = toNumber(value[0]);
+    const latitude = toNumber(value[1]);
+    if (!isValidCoordinate(latitude, longitude)) return null;
+    return { latitude, longitude };
+};
+
+const pointFromEvent = (event) => {
+    const latitude = toNumber(event?.latitude);
+    const longitude = toNumber(event?.longitude);
+    if (!isValidCoordinate(latitude, longitude)) return null;
+    return { latitude, longitude };
+};
+
+const decodePolyline = (encoded = '') => {
+    let index = 0;
+    let lat = 0;
+    let lng = 0;
+    const coordinates = [];
+
+    while (index < encoded.length) {
+        let shift = 0;
+        let result = 0;
+        let byte = null;
+        do {
+            byte = encoded.charCodeAt(index++) - 63;
+            result |= (byte & 0x1f) << shift;
+            shift += 5;
+        } while (byte >= 0x20 && index < encoded.length);
+        lat += (result & 1) ? ~(result >> 1) : (result >> 1);
+
+        shift = 0;
+        result = 0;
+        do {
+            byte = encoded.charCodeAt(index++) - 63;
+            result |= (byte & 0x1f) << shift;
+            shift += 5;
+        } while (byte >= 0x20 && index < encoded.length);
+        lng += (result & 1) ? ~(result >> 1) : (result >> 1);
+
+        const point = { latitude: lat / 1e5, longitude: lng / 1e5 };
+        if (isValidCoordinate(point.latitude, point.longitude)) coordinates.push(point);
     }
 
-    const isSinglePoint = !endCoords || (startCoords.latitude === endCoords.latitude && startCoords.longitude === endCoords.longitude);
+    return coordinates;
+};
 
-    // Calculate center and delta
-    const midLat = isSinglePoint ? startCoords.latitude : (startCoords.latitude + endCoords.latitude) / 2;
-    const midLon = isSinglePoint ? startCoords.longitude : (startCoords.longitude + endCoords.longitude) / 2;
+const lineFromLeg = (leg) => {
+    if (leg?.encodedPolyline) {
+        const decoded = decodePolyline(leg.encodedPolyline);
+        if (decoded.length >= 2) return decoded;
+    }
 
-    // Zoom closer for single point, further for route
-    const latDelta = isSinglePoint ? 0.01 : Math.abs(startCoords.latitude - endCoords.latitude) * 1.5;
-    const lonDelta = isSinglePoint ? 0.01 : Math.abs(startCoords.longitude - endCoords.longitude) * 1.5;
+    const rawCoordinates = leg?.geometry?.coordinates;
+    if (Array.isArray(rawCoordinates) && rawCoordinates.length >= 2) {
+        return rawCoordinates.map(pointFromArray).filter(Boolean);
+    }
+
+    return [];
+};
+
+const connectorLinesFromMarkers = (markers = []) => {
+    const lines = [];
+    for (let i = 1; i < markers.length; i += 1) {
+        lines.push([cleanCoordinate(markers[i - 1]), cleanCoordinate(markers[i])]);
+    }
+    return lines;
+};
+
+const normalizeRoute = (route) => {
+    if (!route) return null;
+
+    if (route.start) {
+        const start = pointFromArray(route.start);
+        const end = pointFromArray(route.end);
+        if (!start) return null;
+        return {
+            markers: end ? [start, end] : [start],
+            polylines: end ? [[start, end]] : [],
+            bounds: null,
+            connectorMode: 'direct',
+        };
+    }
+
+    const events = Array.isArray(route.events) ? route.events : [];
+    const markers = events
+        .map((event, index) => {
+            const point = pointFromEvent(event);
+            if (!point) return null;
+            return route.numberedMarkers ? { ...point, label: String(index + 1) } : point;
+        })
+        .filter(Boolean);
+    const legs = Array.isArray(route.legs) ? route.legs : [];
+    const polylines = route.connectMarkers
+        ? connectorLinesFromMarkers(markers)
+        : legs.map(lineFromLeg).filter((line) => line.length >= 2);
+
+    if (!markers.length && !polylines.length) return null;
+
+    return {
+        markers: markers.length ? markers : polylines.flat(),
+        polylines,
+        bounds: route.bounds || null,
+        connectorMode: route.connectMarkers ? 'overview' : 'geometry',
+    };
+};
+
+const regionFromRoute = (normalized) => {
+    const bounds = normalized?.bounds;
+    const centerLat = toNumber(bounds?.center?.latitude);
+    const centerLng = toNumber(bounds?.center?.longitude);
+    if (centerLat !== null && centerLng !== null) {
+        return {
+            latitude: centerLat,
+            longitude: centerLng,
+            latitudeDelta: Math.max(toNumber(bounds.latitudeDelta) || 0.01, 0.01),
+            longitudeDelta: Math.max(toNumber(bounds.longitudeDelta) || 0.01, 0.01),
+        };
+    }
+
+    const points = [...(normalized?.markers || []), ...(normalized?.polylines || []).flat()]
+        .filter((point) => isValidCoordinate(point?.latitude, point?.longitude));
+    if (!points.length) return null;
+
+    const lats = points.map((point) => point.latitude);
+    const lngs = points.map((point) => point.longitude);
+    const minLat = Math.min(...lats);
+    const maxLat = Math.max(...lats);
+    const minLng = Math.min(...lngs);
+    const maxLng = Math.max(...lngs);
+
+    return {
+        latitude: (minLat + maxLat) / 2,
+        longitude: (minLng + maxLng) / 2,
+        latitudeDelta: Math.max((maxLat - minLat) * 1.5, 0.01),
+        longitudeDelta: Math.max((maxLng - minLng) * 1.5, 0.01),
+    };
+};
+
+const RouteMap = ({ route, theme = 'dark' }) => {
+    const normalized = normalizeRoute(route);
+    if (!normalized) return null;
+
+    const region = regionFromRoute(normalized);
+    if (!region) return null;
 
     return (
         <View style={[styles.container, { backgroundColor: theme === 'light' ? '#f5f5f5' : '#0E141C' }]}>
@@ -206,12 +350,7 @@ const RouteMap = ({ route, theme = 'dark' }) => {
                 provider={PROVIDER_DEFAULT}
                 style={styles.map}
                 customMapStyle={theme === 'light' ? LIGHT_MAP_STYLE : DARK_MAP_STYLE}
-                initialRegion={{
-                    latitude: midLat,
-                    longitude: midLon,
-                    latitudeDelta: Math.max(latDelta, 0.1),
-                    longitudeDelta: Math.max(lonDelta, 0.1),
-                }}
+                initialRegion={region}
                 pitchEnabled={false}
                 rotateEnabled={false}
                 zoomEnabled={true}
@@ -227,26 +366,25 @@ const RouteMap = ({ route, theme = 'dark' }) => {
                     />
                 )}
 
-                {!isSinglePoint && endCoords && (
+                {normalized.polylines.map((coordinates, index) => (
                     <Polyline
-                        coordinates={[startCoords, endCoords]}
-                        strokeColor={theme === 'light' ? "#3E6FFF" : "#3E6FFF"}
-                        strokeWidth={4}
-                        lineDashPattern={[1]}
-                        geodesic={true} // Simple curved line for now
+                        key={`route-line-${index}`}
+                        coordinates={coordinates}
+                        strokeColor="#3E6FFF"
+                        strokeWidth={normalized.connectorMode === 'overview' ? 3 : 4}
+                        lineDashPattern={normalized.connectorMode === 'overview' ? [8, 6] : coordinates.length === 2 ? [1] : undefined}
+                        geodesic={false}
                         zIndex={10}
                     />
-                )}
+                ))}
 
-                <Marker coordinate={startCoords} anchor={{ x: 0.5, y: 0.5 }}>
-                    <View style={[styles.markerDot, { borderColor: theme === 'light' ? '#fff' : '#0E141C' }]} />
-                </Marker>
-
-                {!isSinglePoint && endCoords && (
-                    <Marker coordinate={endCoords} anchor={{ x: 0.5, y: 0.5 }}>
-                        <View style={[styles.markerDot, { borderColor: theme === 'light' ? '#fff' : '#0E141C' }]} />
+                {normalized.markers.map((coordinate, index) => (
+                    <Marker key={`route-marker-${index}`} coordinate={coordinate} anchor={{ x: 0.5, y: 0.5 }}>
+                        <View style={[styles.markerDot, { borderColor: theme === 'light' ? '#fff' : '#0E141C' }]}>
+                            {coordinate.label ? <Text style={styles.markerNumber}>{coordinate.label}</Text> : null}
+                        </View>
                     </Marker>
-                )}
+                ))}
 
             </MapView>
         </View>
@@ -267,10 +405,17 @@ const styles = StyleSheet.create({
         ...StyleSheet.absoluteFillObject,
     },
     markerDot: {
-        width: 14,
-        height: 14,
-        borderRadius: 7,
+        width: 22,
+        height: 22,
+        borderRadius: 11,
         backgroundColor: '#3E6FFF',
         borderWidth: 2,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    markerNumber: {
+        color: '#fff',
+        fontSize: 10,
+        fontWeight: '700',
     }
 });
